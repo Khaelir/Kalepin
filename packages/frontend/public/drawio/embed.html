@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html style="color-scheme: light">
+<head>
+  <meta charset="utf-8">
+  <!-- CSP set via server response header (meta-tag 'self' breaks in sandboxed iframes) -->
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>draw.io</title>
+  <link rel="stylesheet" type="text/css" href="styles/grapheditor.css">
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+  </style>
+</head>
+<body class="geEditor">
+  <script>
+    // Sandboxed iframes (allow-scripts, no allow-same-origin) block
+    // localStorage/sessionStorage with SecurityError. draw.io accesses
+    // these ~75 times. We must shim them before app.min.js loads.
+    //
+    // Strategy (multi-fallback for Safari + Chrome + Firefox):
+    //  1. Test if real storage works -> done, nothing to do
+    //  2. Try Object.defineProperty on window -> works in Chrome/Firefox
+    //  3. Try Object.defineProperty on Window.prototype -> fallback
+    //  4. If all fail, set isLocalStorage=false so draw.io skips storage code
+    (function() {
+      function makeStorage() {
+        var data = {};
+        return {
+          getItem: function(k) { return data.hasOwnProperty(k) ? data[k] : null; },
+          setItem: function(k, v) { data[k] = String(v); },
+          removeItem: function(k) { delete data[k]; },
+          clear: function() { data = {}; },
+          get length() { return Object.keys(data).length; },
+          key: function(i) { var keys = Object.keys(data); return i < keys.length ? keys[i] : null; }
+        };
+      }
+      function shimStorage(name) {
+        // 1. Test if real storage works
+        try { window[name].setItem('__t', '1'); window[name].removeItem('__t'); return true; }
+        catch(e) { /* blocked by sandbox */ }
+        var fake = makeStorage();
+        // 2. Try defining own property on window
+        try { Object.defineProperty(window, name, { value: fake, configurable: true, writable: true }); return true; }
+        catch(e) { /* non-configurable in this browser */ }
+        // 3. Try overriding on Window.prototype (Safari)
+        try {
+          Object.defineProperty(Window.prototype, name, {
+            get: function() { return fake; },
+            configurable: true
+          });
+          return true;
+        } catch(e) { /* also blocked */ }
+        return false;
+      }
+      var lsOk = shimStorage('localStorage');
+      var ssOk = shimStorage('sessionStorage');
+      // If shim failed completely, tell draw.io to skip storage code paths
+      if (!lsOk) window.isLocalStorage = false;
+      console.log('[drawio-iframe] storage shim: localStorage=' + lsOk + ', sessionStorage=' + ssOk);
+    })();
+
+    // draw.io v26 app.min.js does NOT bundle the mxscript() global that it still
+    // references ~39 times. Define it before app.min.js loads so App.loadScripts()
+    // and lazy extension loading work correctly.
+    window.mxscript = function(src, onLoad, id, dataAppKey, doc, onError) {
+      var d = doc || document;
+      var s = d.createElement('script');
+      s.setAttribute('type', 'text/javascript');
+      s.setAttribute('src', src);
+      if (id) s.setAttribute('id', id);
+      if (dataAppKey) s.setAttribute('data-app-key', dataAppKey);
+      if (onLoad) s.onload = function() { onLoad(); };
+      if (onError) s.onerror = function(e) { onError(src, e); };
+      var head = d.getElementsByTagName('head');
+      if (head && head.length > 0) head[0].appendChild(s);
+      else d.documentElement.appendChild(s);
+    };
+
+    // mxBasePath="." means mxGraph loads css/common.css (vendored)
+    // window.mxLoadStylesheets defaults to true — leave it enabled
+
+    // Globals expected by App.main() — must be defined before app.min.js
+    window.mxIsElectron = false;
+    window.mxBasePath = '.';  // default "mxgraph" would need mxgraph/ dir — we use flat structure
+    window.DRAWIO_BASE_URL = null;
+    window.DRAWIO_SERVER_URL = '';
+    window.DRAW_MATH_URL = '';
+
+    // Sandbox blocks alert/confirm/prompt — shim them so draw.io error handlers don't crash
+    window.alert = function(msg) { console.warn('[drawio-iframe] alert:', msg); };
+    window.confirm = function(msg) { console.warn('[drawio-iframe] confirm:', msg); return false; };
+    window.prompt = function(msg) { console.warn('[drawio-iframe] prompt:', msg); return null; };
+  </script>
+  <script>
+    // draw.io expects URL params pre-parsed into window.urlParams before app.min.js loads
+    (function() {
+      var params = {};
+      var search = window.location.search.substring(1);
+      if (search) {
+        search.split('&').forEach(function(pair) {
+          var kv = pair.split('=');
+          params[decodeURIComponent(kv[0])] = kv.length > 1 ? decodeURIComponent(kv[1]) : '1';
+        });
+      }
+      window.urlParams = params;
+    })();
+  </script>
+  <script>
+    // Debug: trace postMessage + errors inside the sandboxed iframe.
+    // NOTE: Cannot read/bind window.parent.postMessage in sandbox -- only call it.
+    window.addEventListener('message', function(e) {
+      try { console.log('[drawio-iframe] <- parent:', JSON.parse(e.data)); } catch(ex) {}
+    });
+    window.onerror = function(msg, src, line, col, err) {
+      console.error('[drawio-iframe] JS error:', msg, 'at', src + ':' + line + ':' + col);
+      return false;
+    };
+    window.addEventListener('unhandledrejection', function(e) {
+      console.error('[drawio-iframe] unhandled rejection:', e.reason);
+    });
+    console.log('[drawio-iframe] loading app.min.js...');
+  </script>
+  <script>
+    // Hide the "Extras" menu item — its options don't work in embed mode.
+    // Uses text-content matching instead of fragile positional CSS selectors.
+    new MutationObserver(function(_, obs) {
+      var items = document.querySelectorAll('.geMenubar .geItem');
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].textContent.trim() === 'Extras') {
+          items[i].style.display = 'none';
+          obs.disconnect();
+          return;
+        }
+      }
+    }).observe(document, { childList: true, subtree: true });
+  </script>
+  <script src="js/app.min.js"></script>
+  <!-- Load shapes/stencils/extensions statically. App.min.js doesn't bundle mxscript(),
+       so App.loadScripts() would fail. dev=1 in URL params makes draw.io skip it. -->
+  <script src="js/shapes-14-6-5.min.js"></script>
+  <script src="js/stencils.min.js"></script>
+  <script src="js/extensions.min.js"></script>
+  <script>
+    console.log('[drawio-iframe] app.min.js + extensions loaded, calling App.main()...');
+    if (typeof App !== 'undefined' && typeof App.main === 'function') {
+      App.main();
+    } else {
+      console.error('[drawio-iframe] App.main not found!');
+    }
+  </script>
+</body>
+</html>

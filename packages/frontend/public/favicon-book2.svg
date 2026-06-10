@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="108" fill="#e94560"/>
+  <g stroke="#fff" fill="none" stroke-linecap="round">
+    <!-- Top cover -->
+    <path d="M164 256 Q208 148 368 100" stroke-width="20"/>
+    <!-- Top pages -->
+    <path d="M164 256 Q236 188 376 156" stroke-width="14"/>
+    <path d="M164 256 Q260 220 380 212" stroke-width="14"/>
+    <!-- Bottom cover -->
+    <path d="M164 256 Q208 364 368 412" stroke-width="20"/>
+    <!-- Bottom pages -->
+    <path d="M164 256 Q236 324 376 356" stroke-width="14"/>
+    <path d="M164 256 Q260 292 380 300" stroke-width="14"/>
+  </g>
+  <!-- Spine binding -->
+  <circle cx="164" cy="256" r="20" fill="#fff"/>
+</svg>

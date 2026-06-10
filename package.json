@@ -1,0 +1,29 @@
+{
+  "name": "kalepin",
+  "version": "0.5.78",
+  "private": true,
+  "packageManager": "pnpm@10.30.1",
+  "license": "MIT",
+  "scripts": {
+    "test:e2e": "pnpm --filter @kalepin/e2e run test:e2e"
+  },
+  "devDependencies": {},
+  "pnpm": {
+    "patchedDependencies": {
+      "@tiptap/react@3.20.1": "patches/@tiptap+react+3.20.1.patch"
+    },
+    "overrides": {
+      "better-sqlite3": "12.6.2",
+      "rxjs": "7.8.2",
+      "onnxruntime-web": "file:./patches/onnxruntime-web-stub"
+    },
+    "onlyBuiltDependencies": [
+      "@nestjs/core",
+      "better-sqlite3",
+      "esbuild",
+      "onnxruntime-node",
+      "protobufjs",
+      "sharp"
+    ]
+  }
+}

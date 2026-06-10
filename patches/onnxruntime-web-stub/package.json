@@ -1,0 +1,17 @@
+{
+  "name": "onnxruntime-web",
+  "version": "0.0.0-stub",
+  "private": true,
+  "description": "In-repo stub. @huggingface/transformers declares onnxruntime-web as a dependency but its prebuilt Node bundle (transformers.node.mjs) replaces the import with an empty module at webpack-build time (`onnxruntime-web (ignored)`). We only run on Node, so the upstream 90MB package is never loaded — this stub satisfies pnpm install without shipping the bytes. See package.json `pnpm.overrides`.",
+  "main": "./index.cjs",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.cjs",
+      "types": "./index.d.ts"
+    }
+  },
+  "license": "MIT"
+}

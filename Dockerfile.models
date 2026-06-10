@@ -1,0 +1,8 @@
+ARG NODE_VERSION=22.14
+FROM node:${NODE_VERSION}-slim AS download
+WORKDIR /app
+COPY packages/backend/scripts/download-model.mjs packages/backend/scripts/
+RUN node packages/backend/scripts/download-model.mjs
+
+FROM scratch
+COPY --from=download /app/packages/backend/models /models

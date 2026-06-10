@@ -1,0 +1,10 @@
+node_modules
+.git
+*.md
+.env*
+.vscode
+.idea
+dist
+packages/frontend/dist
+packages/backend/dist
+packages/backend/models

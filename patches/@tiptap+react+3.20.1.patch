@@ -1,0 +1,79 @@
+diff --git a/dist/index.js b/dist/index.js
+index b0abf6a..11bf1c2 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -85,34 +85,38 @@ var PureEditorContent = class extends React.Component {
+   init() {
+     var _a;
+     const editor = this.props.editor;
+-    if (editor && !editor.isDestroyed && ((_a = editor.view.dom) == null ? void 0 : _a.parentNode)) {
+-      if (editor.contentComponent) {
+-        return;
+-      }
+-      const element = this.editorContentRef.current;
+-      element.append(...editor.view.dom.parentNode.childNodes);
+-      editor.setOptions({
+-        element
+-      });
+-      editor.contentComponent = getInstance();
+-      if (!this.state.hasContentComponentInitialized) {
+-        this.unsubscribeToContentComponent = editor.contentComponent.subscribe(() => {
+-          this.setState((prevState) => {
+-            if (!prevState.hasContentComponentInitialized) {
+-              return {
+-                hasContentComponentInitialized: true
+-              };
+-            }
+-            return prevState;
+-          });
+-          if (this.unsubscribeToContentComponent) {
+-            this.unsubscribeToContentComponent();
++    if (!editor || editor.isDestroyed) return;
++    if (editor.contentComponent) return;
++    const element = this.editorContentRef.current;
++    if (!element) return;
++    // Try to access the view DOM — may throw in tiptap v3 if view not created yet
++    var viewDom = null;
++    try { viewDom = editor.view.dom; } catch(e) { /* view not yet created */ }
++    if (viewDom && ((_a = viewDom.parentNode) != null)) {
++      // View exists and is attached — move its children to our element
++      element.append(...viewDom.parentNode.childNodes);
++    }
++    editor.setOptions({
++      element
++    });
++    editor.contentComponent = getInstance();
++    if (!this.state.hasContentComponentInitialized) {
++      this.unsubscribeToContentComponent = editor.contentComponent.subscribe(() => {
++        this.setState((prevState) => {
++          if (!prevState.hasContentComponentInitialized) {
++            return {
++              hasContentComponentInitialized: true
++            };
+           }
++          return prevState;
+         });
+-      }
+-      editor.createNodeViews();
+-      this.initialized = true;
++        if (this.unsubscribeToContentComponent) {
++          this.unsubscribeToContentComponent();
++        }
++      });
+     }
++    editor.createNodeViews();
++    this.initialized = true;
+   }
+   componentWillUnmount() {
+     var _a;
+@@ -122,9 +126,7 @@ var PureEditorContent = class extends React.Component {
+     }
+     this.initialized = false;
+     if (!editor.isDestroyed) {
+-      editor.view.setProps({
+-        nodeViews: {}
+-      });
++      try { editor.view.setProps({ nodeViews: {} }); } catch(e) { /* view not ready */ }
+     }
+     if (this.unsubscribeToContentComponent) {
+       this.unsubscribeToContentComponent();

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="108" fill="#e94560"/>
+  <defs>
+    <clipPath id="upper">
+      <path d="M160 280 C252 280 352 184 396 76 C368 100 236 200 160 184z"/>
+    </clipPath>
+    <clipPath id="lower">
+      <path d="M160 232 C252 232 352 328 396 436 C368 412 236 312 160 328z"/>
+    </clipPath>
+  </defs>
+  <!-- Stem -->
+  <rect x="108" y="68" width="52" height="376" fill="#fff"/>
+  <rect x="108" y="68" width="8" height="376" fill="rgba(0,0,0,0.05)"/>
+  <!-- Upper arm -->
+  <path d="M160 280 C252 280 352 184 396 76 C368 100 236 200 160 184z" fill="#fff"/>
+  <g clip-path="url(#upper)">
+    <path d="M160 258 C244 258 334 186 378 100" stroke="rgba(0,0,0,0.1)" stroke-width="4" fill="none"/>
+    <path d="M160 240 C236 240 310 184 358 114" stroke="rgba(0,0,0,0.1)" stroke-width="4" fill="none"/>
+    <path d="M160 222 C228 222 284 180 336 130" stroke="rgba(0,0,0,0.1)" stroke-width="4" fill="none"/>
+    <path d="M160 204 C220 204 260 178 314 146" stroke="rgba(0,0,0,0.1)" stroke-width="4" fill="none"/>
+  </g>
+  <!-- Lower arm -->
+  <path d="M160 232 C252 232 352 328 396 436 C368 412 236 312 160 328z" fill="#fff"/>
+  <g clip-path="url(#lower)">
+    <path d="M160 254 C244 254 334 326 378 412" stroke="rgba(0,0,0,0.1)" stroke-width="4" fill="none"/>
+    <path d="M160 272 C236 272 310 328 358 398" stroke="rgba(0,0,0,0.1)" stroke-width="4" fill="none"/>
+    <path d="M160 290 C228 290 284 332 336 382" stroke="rgba(0,0,0,0.1)" stroke-width="4" fill="none"/>
+    <path d="M160 308 C220 308 260 334 314 366" stroke="rgba(0,0,0,0.1)" stroke-width="4" fill="none"/>
+  </g>
+</svg>

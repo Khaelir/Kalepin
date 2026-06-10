@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Outer red K -->
+  <path d="
+    M225 85 L365 85
+    L365 295
+    C425 195 582 82 795 28
+    C812 22 822 30 820 52 L812 82
+    C598 158 432 340 365 492
+    L365 508
+    C432 660 598 842 812 918
+    Q822 968 795 972
+    C582 918 425 805 365 705
+    L365 915 L225 915 Z
+  " fill="#DB131A"/>
+
+  <!-- Inner white K -->
+  <path d="
+    M263 123 L327 123
+    L327 338
+    C395 242 545 130 758 68
+    L758 118
+    C545 188 395 340 327 452
+    L327 548
+    C395 660 545 812 758 882
+    L758 932
+    C545 870 395 758 327 662
+    L327 877 L263 877 Z
+  " fill="#fff"/>
+
+  <!-- Subtle left-stem shadow -->
+  <rect x="225" y="85" width="11" height="830" fill="#B60C13" opacity="0.35"/>
+
+  <!-- Upper page lines (interpolated between boundary curves) -->
+  <path d="M338 435 C395 325 545 179 720 115" stroke="#DCDCDC" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M338 412 C395 306 545 168 720 105" stroke="#DCDCDC" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M338 389 C395 286 545 156 720 95" stroke="#DCDCDC" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M338 366 C395 266 545 144 720 83" stroke="#DCDCDC" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+
+  <!-- Lower page lines (mirrored) -->
+  <path d="M338 565 C395 675 545 821 720 887" stroke="#DCDCDC" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M338 588 C395 694 545 832 720 897" stroke="#DCDCDC" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M338 611 C395 714 545 844 720 907" stroke="#DCDCDC" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M338 634 C395 734 545 856 720 917" stroke="#DCDCDC" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+</svg>

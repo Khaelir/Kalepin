@@ -1,0 +1,60 @@
+services:
+  kalepin:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - vault:/data/vault
+      - personal:/data/personal
+      - db:/data/db
+    # At-rest encryption: mount the KEK as a docker secret. The KEK MUST NOT live in the
+    # same backup as /data — see README "Encryption" for the operator runbook.
+    secrets:
+      - kalepin_kek
+    environment:
+      - STORAGE_ADAPTER=localfs
+      - VAULT_PATH=/data/vault
+      - PERSONAL_PATH=/data/personal
+      - DB_PATH=/data/db/kalepin.sqlite
+      # REQUIRED: generate with `openssl rand -hex 32` and replace before first boot.
+      # The backend refuses to start in production with this placeholder or any value < 32 chars.
+      - JWT_SECRET=8705d13e8aeb758970b22d8b2351a346abee48354ec93813c2716eeca4fe7d88
+      - JWT_EXPIRY=7d
+      - DOMAIN_ALLOWLIST=*
+      # Admin emails (comma-separated, for admin API key scope)
+      - ADMIN_EMAILS=admin@kalepin.local
+      # Encryption: path to the docker secret mount.
+      - KALEPIN_KEK_FILE=/run/secrets/kalepin_kek
+      # S3 Backup (uncomment to enable)
+      # - S3_BACKUP_BUCKET=my-kalepin-backups
+      # - S3_BACKUP_REGION=us-east-1
+      # - S3_BACKUP_ACCESS_KEY_ID=
+      # - S3_BACKUP_SECRET_ACCESS_KEY=
+      # - S3_BACKUP_PREFIX=backups
+      # - S3_BACKUP_SCHEDULE=0 3 * * *
+      # - S3_BACKUP_RETENTION_DAYS=30
+      # - S3_BACKUP_ENDPOINT=
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)throw r.status}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+# KEK secret. Pick one of:
+#   - Compose file mount (this snippet): `openssl rand -out ./secrets/kalepin.kek 32 && chmod 0400 ./secrets/kalepin.kek`
+#   - Swarm + Portainer ≥ 2.18 (binary upload): create the secret with the
+#     32-byte file uploaded via Portainer's "Format: File" option.
+#   - Swarm + text-only Portainer: paste the output of `openssl rand -hex 32`
+#     (64 chars). The container entrypoint decodes hex → 32 raw bytes at
+#     /run/kalepin/kek (mode 0600).
+# Back it up to a SEPARATE location from /data — losing the KEK loses every encrypted byte.
+secrets:
+  kalepin_kek:
+    file: ./secrets/kalepin.kek
+
+volumes:
+  vault:
+  personal:
+  db:

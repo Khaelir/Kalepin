@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="108" fill="#e94560"/>
+  <!-- Spine -->
+  <rect x="160" y="108" width="52" height="296" rx="4" fill="#fff"/>
+  <!-- Upper page — curves upward like an opening page -->
+  <path d="M212 208 Q290 72 384 108 L340 108 Q270 148 212 248z" fill="#fff"/>
+  <!-- Lower page — curves downward, mirrored -->
+  <path d="M212 264 Q270 364 340 404 L384 404 Q290 440 212 304z" fill="#fff"/>
+</svg>
