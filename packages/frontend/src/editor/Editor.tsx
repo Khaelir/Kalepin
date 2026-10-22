@@ -35,6 +35,7 @@ import { ContextMenu, ContextMenuItem } from '../components/ContextMenu';
 import { TableControls } from './TableControls';
 import { FloatingInput } from '../components/FloatingInput';
 import { WSClient } from '../ws/ws-client';
+import { getPinUnlockToken } from '../api';
 import { CollaborativeCursors, updateRemotePresence, removeRemotePresence } from './extensions/collaborative-cursors';
 import { CommentHighlights, updateCommentHighlights, setCommentHighlightOnClick } from './extensions/comment-highlights';
 import { FloatingMinimap } from './FloatingMinimap';
@@ -1140,7 +1141,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       if (!msg.wasReconnect) return;
       // Re-send doc:open to get fresh content + revision
       console.debug(`[Editor] Reconnected, re-syncing docId="${docId}"`);
-      wsClient.send({ type: 'doc:open', docId });
+      wsClient.send({ type: 'doc:open', docId, unlock: getPinUnlockToken(docId) });
     });
 
     const offDocOpened = wsClient.on('doc:opened', (msg: any) => {

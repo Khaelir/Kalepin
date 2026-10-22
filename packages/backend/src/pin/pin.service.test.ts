@@ -267,3 +267,31 @@ describe('PinService — assertUnlockedForRequest (cookie + header)', () => {
     });
   });
 });
+
+describe('PinService.isUnlockedFor (WebSocket gate)', () => {
+  it('lets through paths without a PIN', async () => {
+    assert.equal(await svc.isUnlockedFor(NOTE, BOB, undefined, undefined), true);
+  });
+
+  it('keeps a PIN-locked note closed without a credential', async () => {
+    await svc.setPin(NOTE, PIN, ALICE);
+    assert.equal(await svc.isUnlockedFor(NOTE, BOB, undefined, undefined), false);
+    assert.equal(await svc.isUnlockedFor(NOTE, BOB, 'other=1', 'garbage'), false);
+  });
+
+  it('accepts the unlock cookie from the upgrade request or a frame token', async () => {
+    await svc.setPin(NOTE, PIN, ALICE);
+    const { token } = await svc.verifyPin(NOTE, PIN, BOB, 'grantee');
+    const cookie = `a=b; ${pinCookieName(NOTE)}=${token}`;
+    assert.equal(await svc.isUnlockedFor(NOTE, BOB, cookie, undefined), true);
+    assert.equal(await svc.isUnlockedFor(NOTE, BOB, undefined, token), true);
+  });
+
+  it('rejects a token minted for another viewer or path', async () => {
+    await svc.setPin(NOTE, PIN, ALICE);
+    const { token } = await svc.verifyPin(NOTE, PIN, ALICE, 'owner');
+    assert.equal(await svc.isUnlockedFor(NOTE, BOB, undefined, token), false);
+    const other = svc.mintUnlockToken('_users/alice@example.com/bar.md', BOB, 'grantee');
+    assert.equal(await svc.isUnlockedFor(NOTE, BOB, undefined, other), false);
+  });
+});

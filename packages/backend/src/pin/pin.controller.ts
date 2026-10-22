@@ -148,7 +148,10 @@ export class PinController {
       maxAge: (result.ttlSeconds ?? GRANTEE_TTL_SECONDS) * 1000,
       path: '/',
     });
-    return { ok: true, expiresIn: result.ttlSeconds };
+    // The token also goes in the body: an already-open WebSocket never sees
+    // the new cookie, so the client presents it in its next doc:open frame.
+    // It is bound to (path, viewer), the same as the cookie.
+    return { ok: true, expiresIn: result.ttlSeconds, token: result.token };
   }
 
   @Post('pin/list')

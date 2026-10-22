@@ -34,10 +34,15 @@ import {
 } from '../crypto/encryption-predicates';
 import { AccessLogService } from '../access-log/access-log.service';
 import { DocHandlesService } from '../doc-handles/doc-handles.service';
+import { PinService } from '../pin/pin.service';
 
 interface AuthenticatedWebSocket extends WebSocket {
   user?: JwtPayload;
   docId?: string;
+  /** Cookie header of the upgrade request — frames carry no cookies. */
+  cookieHeader?: string;
+  /** Docs this socket opened through the doc:open gates (PIN included). */
+  openedDocs?: Set<string>;
 }
 
 /** How long ops sent under a renamed doc's old id are still routed to the new one. */
@@ -71,6 +76,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly visibility: GrantAwareVisibility,
     private readonly accessLog: AccessLogService,
     private readonly docHandles: DocHandlesService,
+    private readonly pinService: PinService,
     @Optional() @Inject(forwardRef(() => LinkIndexService)) private readonly linkIndexService?: LinkIndexService,
   ) {
     // Wire OT broadcast so rename-rewriting can push ops to clients
@@ -187,6 +193,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.close(4001, 'Unauthorized');
       return;
     }
+    client.cookieHeader = req.headers.cookie;
 
     if (client.user?.email) {
       const email = client.user.email.toLowerCase();
@@ -223,7 +230,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('doc:open')
   async handleDocOpen(
     @ConnectedSocket() client: AuthenticatedWebSocket,
-    @MessageBody() data: { docId: string },
+    @MessageBody() data: { docId: string; unlock?: string },
   ) {
     if (!client.user) return;
 
@@ -257,6 +264,13 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
+    // PIN gate, same rule as the REST read: the unlock cookie (sent with the
+    // upgrade request) or an unlock token in the frame.
+    if (!(await this.pinService.isUnlockedFor(data.docId, viewerEmail, client.cookieHeader, data.unlock))) {
+      client.send(JSON.stringify({ type: 'error', code: 'pin-locked', docId: data.docId }));
+      return;
+    }
+
     // Explicitly opening a renamed doc's old path means a new doc now lives
     // there; stop routing that id to the renamed one.
     this.movedDocIds.delete(data.docId);
@@ -278,6 +292,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
 
     client.docId = data.docId;
+    (client.openedDocs ??= new Set()).add(data.docId);
 
     // Lazy-mint a doc handle so the frontend can normalize the URL bar to
     // /doc/<id> on receipt of doc:opened. Best-effort — a mint failure must
@@ -328,6 +343,20 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
         code: 'forbidden',
         docId: data.docId,
         message: 'Write permission required',
+      }));
+      return;
+    }
+    // A doc opened on this socket already passed the PIN gate; anything else
+    // must present the unlock cookie itself.
+    if (
+      !client.openedDocs?.has(docId) &&
+      !(await this.pinService.isUnlockedFor(docId, client.user.email.toLowerCase(), client.cookieHeader, undefined))
+    ) {
+      client.send(JSON.stringify({
+        type: 'error',
+        code: 'pin-locked',
+        docId: data.docId,
+        message: 'Note is PIN-locked',
       }));
       return;
     }
@@ -416,6 +445,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
           continue;
         }
         client.docId = to;
+        if (client.openedDocs?.has(from)) client.openedDocs.add(to);
         if (client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify({ type: 'doc:moved', from, to }));
         }
