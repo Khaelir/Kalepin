@@ -115,7 +115,11 @@ export async function moveFile(src: string, dest: string): Promise<void> {
     headers: baseHeaders(),
     body: JSON.stringify({ src, dest }),
   }));
-  if (!res.ok) throw new Error('Failed to move file');
+  if (!res.ok) {
+    // Surface the server's reason (e.g. 409 "… already exists").
+    const body = await res.json().catch(() => null);
+    throw new Error(typeof body?.message === 'string' ? body.message : 'Failed to move file');
+  }
 }
 
 export async function deleteDirectory(path: string): Promise<void> {

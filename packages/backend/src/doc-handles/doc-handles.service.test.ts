@@ -129,6 +129,35 @@ describe('DocHandlesService.updatePath', () => {
     const result = await service.resolve(id);
     assert.equal(result.path, 'Archive/Foo.md');
   });
+
+  it('updatePathByPath keeps the moved row when the watcher already minted one at the new path', async () => {
+    const id = await service.findOrCreateForPath('Notes/Foo.md');
+    const raced = await service.findOrCreateForPath('Notes/Bar.md');
+    await service.updatePathByPath('Notes/Foo.md', 'Notes/Bar.md');
+    assert.equal(await service.forPath('Notes/Bar.md'), id);
+    await assert.rejects(service.resolve(raced), NotFoundException);
+  });
+
+  it('updatePathByPath replaces the tombstone of a file deleted at the new path', async () => {
+    const deleted = await service.findOrCreateForPath('Notes/Bar.md');
+    await service.tombstone(deleted);
+    const id = await service.findOrCreateForPath('Notes/Foo.md');
+    await service.updatePathByPath('Notes/Foo.md', 'Notes/Bar.md');
+    assert.deepEqual(await service.resolve(id), { path: 'Notes/Bar.md', tombstoned: false });
+  });
+
+  it('updatePathByPath is a no-op when no row exists at the old path', async () => {
+    const other = await service.findOrCreateForPath('Notes/Bar.md');
+    await service.updatePathByPath('Notes/Foo.md', 'Notes/Bar.md');
+    assert.equal(await service.forPath('Notes/Bar.md'), other);
+  });
+
+  it('updatePathPrefix keeps moved rows over rows already at the new paths', async () => {
+    const id = await service.findOrCreateForPath('Old/Foo.md');
+    await service.findOrCreateForPath('New/Foo.md');
+    await service.updatePathPrefix('Old', 'New');
+    assert.equal(await service.forPath('New/Foo.md'), id);
+  });
 });
 
 describe('DocHandlesService.tombstone', () => {

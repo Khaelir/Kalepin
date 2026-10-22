@@ -74,6 +74,47 @@ export class OTSessionManager {
     return this.sessions.get(docId);
   }
 
+  /** Ids of open sessions for `path` itself or anything under `path/` (folder moves). */
+  sessionIdsAtOrUnder(path: string): string[] {
+    const prefix = path + '/';
+    return [...this.sessions.keys()].filter((id) => id === path || id.startsWith(prefix));
+  }
+
+  /**
+   * Re-key a session after its file was renamed on disk, so later flushes
+   * write to the new path. Timers capture the doc id in their closure, so they
+   * are re-armed under `newId`. A session already at `newId` (opened on a path
+   * that had no file yet) is discarded; its clients are returned so the caller
+   * can tell them to reload. Returns null when there is no session at `oldId`.
+   */
+  renameSession(oldId: string, newId: string): { displaced: WebSocket[] } | null {
+    const session = this.sessions.get(oldId);
+    if (!session || oldId === newId) return null;
+
+    let displaced: WebSocket[] = [];
+    const existing = this.sessions.get(newId);
+    if (existing) {
+      this.logger.warn(`renameSession: discarding session already open at "${newId}"`);
+      if (existing.flushTimer) clearTimeout(existing.flushTimer);
+      if (existing.inactivityTimer) clearTimeout(existing.inactivityTimer);
+      displaced = [...existing.clients.keys()];
+    }
+
+    this.sessions.delete(oldId);
+    session.docId = newId;
+    this.sessions.set(newId, session);
+
+    if (session.flushTimer) clearTimeout(session.flushTimer);
+    session.flushTimer = undefined;
+    if (session.dirty) {
+      this.scheduleDebouncedFlush(newId);
+    } else {
+      this.resetInactivityTimer(newId);
+    }
+    this.logger.debug(`Renamed session "${oldId}" -> "${newId}", dirty=${session.dirty}`);
+    return { displaced };
+  }
+
   resetContent(docId: string, newContent: string): void {
     const session = this.sessions.get(docId);
     if (!session) return;

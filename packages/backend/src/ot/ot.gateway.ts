@@ -40,6 +40,9 @@ interface AuthenticatedWebSocket extends WebSocket {
   docId?: string;
 }
 
+/** How long ops sent under a renamed doc's old id are still routed to the new one. */
+const MOVED_ALIAS_TTL_MS = 30_000;
+
 @WebSocketGateway({ path: '/ws' })
 export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(OTGateway.name);
@@ -52,6 +55,12 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * events only to that user's WS sessions, and as the basis for `broadcastToVisible`.
    */
   private clientsByEmail = new Map<string, Set<AuthenticatedWebSocket>>();
+
+  /**
+   * Old → new doc id for recently renamed docs. Ops a client sent before it
+   * received `doc:moved` still carry the old id; this lets them land.
+   */
+  private movedDocIds = new Map<string, { to: string; expiresAt: number }>();
 
   constructor(
     private readonly otService: OTService,
@@ -130,6 +139,13 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       } else {
         this.broadcastToDocClients(docId, { type: 'flush:error', docId, error });
       }
+    });
+
+    // Keep live sessions in step with renames/moves: persist pending edits
+    // before the file moves, then re-key the session to the new path.
+    this.filesService.registerMoveHooks({
+      beforeMove: (src) => this.otService.flushSessionsUnder(src),
+      afterMove: (src, dest) => this.followRename(src, dest),
     });
 
     // Subscribe to external file writes (e.g. MCP)
@@ -241,6 +257,10 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
+    // Explicitly opening a renamed doc's old path means a new doc now lives
+    // there; stop routing that id to the renamed one.
+    this.movedDocIds.delete(data.docId);
+
     const previousDocId = client.docId;
     this.logger.debug(`doc:open "${data.docId}", prev="${previousDocId}", user=${client.user.email}`);
 
@@ -295,11 +315,12 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     if (!client.user) return;
     this.logger.debug(`op "${data.docId}", rev=${data.rev}, user=${client.user.email}`);
+    const docId = this.resolveDocId(data.docId);
 
     // Comment-only grantees can observe ops but must not produce them. The
     // doc:open gate accepts comment grantees so they can view & comment, so
     // we re-check write permission on every op (server is authoritative).
-    const v = await this.visibility.visibilityFor(data.docId, client.user.email.toLowerCase());
+    const v = await this.visibility.visibilityFor(docId, client.user.email.toLowerCase());
     const writable = v.kind === 'owner' || (v.kind === 'grant' && v.permission === 'write');
     if (!writable) {
       client.send(JSON.stringify({
@@ -312,7 +333,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     const result = await this.otService.applyOperation(
-      data.docId,
+      docId,
       data.ops as any,
       data.rev,
       client.user.sub,
@@ -325,9 +346,10 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     // Edit access log: dedup window collapses rapid keystrokes to a single row.
     // No IP is available on the WebSocket frame path; that's expected.
-    void this.accessLog.record(data.docId, client.user.email, 'edit', null);
+    void this.accessLog.record(docId, client.user.email, 'edit', null);
 
-    // Ack to sender
+    // Ack to sender under the id it sent, so its OT client recognises it even
+    // if the doc was renamed in between.
     client.send(JSON.stringify({
       type: 'ack',
       docId: data.docId,
@@ -335,12 +357,70 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }));
 
     // Broadcast to other clients
-    this.broadcastToDocClients(data.docId, {
+    this.broadcastToDocClients(docId, {
       type: 'op',
-      docId: data.docId,
+      docId,
       ops: result.ops,
       rev: result.revision,
     }, client);
+  }
+
+  /** Map a renamed doc's old id to its new one while the alias is fresh. */
+  private resolveDocId(docId: string): string {
+    // A live session at this id is a doc opened there since — never redirect it.
+    if (this.otService.sessionManager.getSession(docId)) return docId;
+    const moved = this.movedDocIds.get(docId);
+    if (!moved) return docId;
+    if (Date.now() > moved.expiresAt) {
+      this.movedDocIds.delete(docId);
+      return docId;
+    }
+    return moved.to;
+  }
+
+  /**
+   * After `src` was renamed to `dest`: re-key the open sessions and tell
+   * their clients where the doc went. Clients that can't see the new path
+   * (e.g. a shared doc moved into its owner's personal folder) are dropped
+   * from the session without being told the new path.
+   */
+  private async followRename(src: string, dest: string): Promise<void> {
+    const renamed = await this.otService.renameSessions(src, dest);
+    const now = Date.now();
+    for (const [old, moved] of this.movedDocIds) {
+      if (now > moved.expiresAt) this.movedDocIds.delete(old);
+    }
+    for (const { from, to, displaced } of renamed) {
+      // Chained renames (A → B → C): older aliases follow to the latest path.
+      for (const moved of this.movedDocIds.values()) {
+        if (moved.to === from) moved.to = to;
+      }
+      this.movedDocIds.set(from, { to, expiresAt: now + MOVED_ALIAS_TTL_MS });
+
+      const reload = JSON.stringify({ type: 'doc:reload', path: to });
+      for (const ws of displaced) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(reload);
+      }
+
+      const clients = this.otService.sessionManager.getClients(to);
+      for (const [ws, info] of clients ? [...clients] : []) {
+        const client = ws as AuthenticatedWebSocket;
+        const v = await this.visibility.visibilityFor(to, info.email.toLowerCase());
+        const canFollow = v.kind === 'owner' || (v.kind === 'grant' && v.permission !== 'read');
+        if (!canFollow) {
+          this.otService.sessionManager.removeClient(to, client);
+          client.docId = undefined;
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ type: 'error', code: 'not_found', docId: from }));
+          }
+          continue;
+        }
+        client.docId = to;
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ type: 'doc:moved', from, to }));
+        }
+      }
+    }
   }
 
   @SubscribeMessage('doc:flush')

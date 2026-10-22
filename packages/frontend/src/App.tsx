@@ -462,6 +462,11 @@ export function App() {
       }
     });
 
+    // The open doc was renamed or moved (by this tab or anyone else).
+    ws.on('doc:moved', (msg: any) => {
+      followActiveDocAfterMove(msg.from, msg.to);
+    });
+
     ws.on('file:tree-update', () => {
       loadFileTree();
     });
@@ -692,10 +697,13 @@ export function App() {
   // Open document. The URL bar always normalizes to `/doc/<handle-id>` once
   // the read response delivers the handle. Until then we push the legacy
   // `/doc/<path>` form so back/forward stays consistent.
-  const openFile = useCallback(async (path: string, heading?: string) => {
+  const openFile = useCallback(async (path: string, heading?: string, opts?: { replaceHistory?: boolean }) => {
     console.debug(`[App.openFile] Switching to file: "${path}", previous activeFile: "${activeFile}"`);
     setDocState(null); // Clear stale content so Editor unmounts until new content arrives
     setActiveFile(path);
+    // Update the ref now rather than after render, so a rename followed both
+    // via the HTTP response and the `doc:moved` frame opens the doc only once.
+    activeFileRef.current = path;
     recordVisit(path);
     setPresenceUsers([]);
     setVersionPreview(null);
@@ -708,6 +716,10 @@ export function App() {
     const initialUrl = buildDocUrlByPath(path, heading);
     if (isPopstateRef.current) {
       isPopstateRef.current = false;
+    } else if (opts?.replaceHistory) {
+      // Same doc under a new path (rename): don't leave a back entry pointing
+      // at the old path.
+      window.history.replaceState({ file: path }, '', initialUrl);
     } else {
       window.history.pushState({ file: path }, '', initialUrl);
     }
@@ -817,6 +829,19 @@ export function App() {
       })
       .catch(() => { /* ignore — header just omits those fields */ });
   }, []);
+
+  // After `src` was renamed/moved to `dest`, re-open the active doc at its new
+  // path if it was the moved file or lives under the moved folder. The server
+  // re-keys the live session to the new path; only re-opening attaches the
+  // editor to it — switching `activeFile` alone left edits going nowhere.
+  const followActiveDocAfterMove = useCallback((src: string, dest: string) => {
+    const current = activeFileRef.current;
+    if (!current) return;
+    let next: string | null = null;
+    if (current === src) next = dest;
+    else if (current.startsWith(src + '/')) next = dest + current.slice(src.length);
+    if (next) void openFile(next, undefined, { replaceHistory: true });
+  }, [openFile]);
 
   // Bind the create-item ref now that openFile is declared.
   createItemRef.current = async (kind: CreateKind, parentPath: string) => {
@@ -1125,25 +1150,14 @@ export function App() {
           if (newName !== entry.name) {
             const parent = entry.path.split('/').slice(0, -1).join('/');
             const dest = parent ? `${parent}/${newName}` : newName;
-            await api.moveFile(entry.path, dest);
-            if (activeFile) {
-              let newActive: string | null = null;
-              if (activeFile === entry.path) {
-                newActive = dest;
-              } else if (entry.type === 'directory' && activeFile.startsWith(entry.path + '/')) {
-                newActive = activeFile.replace(entry.path, dest);
-              }
-              if (newActive) {
-                setActiveFile(newActive);
-                // The handle survives rename (server updates path, id stays).
-                // If the URL is already in `/doc/<id>` form there's nothing
-                // to update; only the legacy path-form URL needs rewriting.
-                const parsed = parseDocUrl();
-                if (parsed?.filePath) {
-                  window.history.replaceState({ file: newActive }, '', buildDocUrlByPath(newActive));
-                }
-              }
+            try {
+              await api.moveFile(entry.path, dest);
+            } catch (err) {
+              // Keep the modal open so the name can be corrected.
+              addToast((err as Error).message || 'Rename failed', 'error');
+              return;
             }
+            followActiveDocAfterMove(entry.path, dest);
             loadFileTree();
           }
           setModal(null);
@@ -1356,15 +1370,10 @@ export function App() {
     if (nudgeRegistryRef.current.rekey(current, dest)) {
       triggerPendingShareNudge(dest);
     }
-    setActiveFile(dest);
-    // Handle survives rename — only update URL when in legacy path-form.
-    const parsedAfterRename = parseDocUrl();
-    if (parsedAfterRename?.filePath) {
-      window.history.replaceState({ file: dest }, '', buildDocUrlByPath(dest));
-    }
+    followActiveDocAfterMove(current, dest);
     loadFileTree();
     return true;
-  }, [addToast, loadFileTree, triggerPendingShareNudge]);
+  }, [addToast, loadFileTree, triggerPendingShareNudge, followActiveDocAfterMove]);
 
   // OAuth consent route — short-circuits the workspace render so unauthenticated
   // users get the consent-aware login flow (which round-trips back to this URL
@@ -1513,29 +1522,30 @@ export function App() {
               const handleRename = async (entry: FileEntry, newName: string) => {
                 const dir = entry.path.split('/').slice(0, -1).join('/');
                 const dest = dir ? `${dir}/${newName}` : newName;
-                await api.moveFile(entry.path, dest);
-                if (activeFile) {
-                  let newActive: string | null = null;
-                  if (activeFile === entry.path) {
-                    newActive = dest;
-                  } else if (entry.type === 'directory' && activeFile.startsWith(entry.path + '/')) {
-                    newActive = activeFile.replace(entry.path, dest);
-                  }
-                  if (newActive) {
-                    setActiveFile(newActive);
-                    const parsedAfterRename = parseDocUrl();
-                    if (parsedAfterRename?.filePath) {
-                      window.history.replaceState({ file: newActive }, '', buildDocUrlByPath(newActive));
-                    }
-                  }
+                try {
+                  await api.moveFile(entry.path, dest);
+                } catch (err) {
+                  addToast((err as Error).message || 'Rename failed', 'error');
+                  return;
                 }
+                followActiveDocAfterMove(entry.path, dest);
                 loadFileTree();
+              };
+              const handleMove = async (src: string, dest: string) => {
+                try {
+                  await api.moveFile(src, dest);
+                } catch (err) {
+                  addToast((err as Error).message || 'Move failed', 'error');
+                  return;
+                }
+                followActiveDocAfterMove(src, dest);
+                await loadFileTree();
               };
               const commonProps = {
                 files,
                 activeFile,
                 onFileSelect: (path: string) => { setView('workspace'); openFile(path); },
-                onMove: (src: string, dest: string) => api.moveFile(src, dest).then(loadFileTree),
+                onMove: handleMove,
                 onRename: handleRename,
                 onContextMenu: handleContextMenu,
                 searchQuery,

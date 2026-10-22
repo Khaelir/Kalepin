@@ -23,9 +23,21 @@ import { DocumentGrant } from '../entities/document-grant.entity';
 import { isE2EPath } from '../crypto/encryption-predicates';
 import * as path from 'path';
 
+/**
+ * Lets other modules take part in `FilesService.move` without FilesService
+ * depending on them (the OT gateway uses it to keep live sessions in step).
+ */
+export interface MoveHooks {
+  /** Runs before the rename touches disk. Throwing aborts the move. */
+  beforeMove?: (src: string, dest: string) => Promise<void>;
+  /** Runs once the rename and every path rewrite are done. Errors are logged. */
+  afterMove?: (src: string, dest: string) => Promise<void>;
+}
+
 @Injectable()
 export class FilesService extends EventEmitter {
   private readonly logger = new Logger(FilesService.name);
+  private readonly moveHooks: MoveHooks[] = [];
 
   constructor(
     @Inject(STORAGE_ADAPTER) private readonly storage: StorageAdapter,
@@ -313,6 +325,10 @@ export class FilesService extends EventEmitter {
     }
   }
 
+  registerMoveHooks(hooks: MoveHooks): void {
+    this.moveHooks.push(hooks);
+  }
+
   async move(src: string, dest: string, userEmail?: string): Promise<void> {
     if (userEmail) {
       // Both ends gated; non-owner sees 404 for either side.
@@ -325,38 +341,63 @@ export class FilesService extends EventEmitter {
         throw new BadRequestException('"_users" is reserved');
       }
     }
+    // A same-path move would read, re-write and then delete the file on the
+    // encrypting adapter.
+    if (src === dest) return;
+    // fs.rename silently replaces an existing destination. Case-only renames
+    // are let through: on a case-insensitive filesystem `dest` "exists" because
+    // it is the source itself.
+    if (src.toLowerCase() !== dest.toLowerCase() && (await this.storage.exists(dest))) {
+      throw new ConflictException(`"${dest}" already exists`);
+    }
+    for (const hooks of this.moveHooks) {
+      await hooks.beforeMove?.(src, dest);
+    }
     await this.storage.move(src, dest);
-    // Move sidecar file too
-    const srcSidecar = this.sidecarPath(src);
-    const destSidecar = this.sidecarPath(dest);
-    if (await this.storage.exists(srcSidecar)) {
-      await this.storage.move(srcSidecar, destSidecar);
-    }
-    // Rewrite links across the vault pointing to the old path
-    if (dest.endsWith('.md') && this.linkIndex) {
-      await this.linkIndex.rewriteLinksOnRename(src, dest);
-    }
-    // Rewrite _attachments/ relative paths in .md files
-    if (dest.endsWith('.md')) {
-      await this.rewriteAttachmentPaths(src, dest);
-      // When the move crosses the shared/personal boundary, copy referenced
-      // attachment files into the destination namespace so the doc still renders.
-      await this.copyAttachmentsAcrossBoundary(src, dest);
-    }
-    // Update share link path (file or folder rename)
-    if (this.shareLinks) {
-      await this.shareLinks.updatePath(src, dest);
-      await this.shareLinks.updatePathPrefix(src, dest);
-    }
-    // Update grants on the moved path or its subtree.
-    if (this.grants) {
-      await this.grants.cascadeRename(src, dest);
-    }
-    // Mirror the same exact + prefix rewrite for doc handles so internal
-    // /doc/<id> URLs survive the rename.
-    if (this.docHandles) {
-      await this.docHandles.updatePathByPath(src, dest);
-      await this.docHandles.updatePathPrefix(src, dest);
+    try {
+      // Move sidecar file too
+      const srcSidecar = this.sidecarPath(src);
+      const destSidecar = this.sidecarPath(dest);
+      if (await this.storage.exists(srcSidecar)) {
+        await this.storage.move(srcSidecar, destSidecar);
+      }
+      // Rewrite links across the vault pointing to the old path
+      if (dest.endsWith('.md') && this.linkIndex) {
+        await this.linkIndex.rewriteLinksOnRename(src, dest);
+      }
+      // Rewrite _attachments/ relative paths in .md files
+      if (dest.endsWith('.md')) {
+        await this.rewriteAttachmentPaths(src, dest);
+        // When the move crosses the shared/personal boundary, copy referenced
+        // attachment files into the destination namespace so the doc still renders.
+        await this.copyAttachmentsAcrossBoundary(src, dest);
+      }
+      // Update share link path (file or folder rename)
+      if (this.shareLinks) {
+        await this.shareLinks.updatePath(src, dest);
+        await this.shareLinks.updatePathPrefix(src, dest);
+      }
+      // Update grants on the moved path or its subtree.
+      if (this.grants) {
+        await this.grants.cascadeRename(src, dest);
+      }
+      // Mirror the same exact + prefix rewrite for doc handles so internal
+      // /doc/<id> URLs survive the rename.
+      if (this.docHandles) {
+        await this.docHandles.updatePathByPath(src, dest);
+        await this.docHandles.updatePathPrefix(src, dest);
+      }
+    } finally {
+      // The file has moved even if a bookkeeping step above failed, so live
+      // sessions must follow it. A failing hook is logged, not rethrown: it
+      // must not mask the move's own outcome.
+      for (const hooks of this.moveHooks) {
+        try {
+          await hooks.afterMove?.(src, dest);
+        } catch (err) {
+          this.logger.error(`afterMove hook failed for "${src}" -> "${dest}"`, err);
+        }
+      }
     }
   }
 

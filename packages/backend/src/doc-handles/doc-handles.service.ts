@@ -82,12 +82,9 @@ export class DocHandlesService {
   /** Update the path of the row matching `oldPath`, if any. Convenience for
    * call-sites that have a path rather than an id. */
   async updatePathByPath(oldPath: string, newPath: string): Promise<void> {
-    await this.repo
-      .createQueryBuilder()
-      .update()
-      .set({ path: newPath })
-      .where('path = :oldPath', { oldPath })
-      .execute();
+    if (oldPath === newPath) return;
+    const row = await this.repo.findOne({ where: { path: oldPath } });
+    if (row) await this.repathRow(row.id, newPath);
   }
 
   /** Rewrite all rows whose path starts with `oldPrefix + '/'`. Used by folder
@@ -98,8 +95,37 @@ export class DocHandlesService {
       .where('h.path LIKE :prefix', { prefix: `${oldPrefix}/%` })
       .getMany();
     for (const item of items) {
-      item.path = newPrefix + item.path.slice(oldPrefix.length);
-      await this.repo.save(item);
+      await this.repathRow(item.id, newPrefix + item.path.slice(oldPrefix.length));
+    }
+  }
+
+  /**
+   * Point row `id` at `newPath`, keeping its id so existing /doc/<id> URLs
+   * follow a rename. Another row may already hold `newPath`: the tombstone of
+   * a file deleted there earlier, or one the file watcher minted when it saw
+   * the moved file appear before this update ran. The moved file's row wins.
+   */
+  private async repathRow(id: string, newPath: string): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      await this.repo
+        .createQueryBuilder()
+        .delete()
+        .where('path = :newPath', { newPath })
+        .andWhere('id != :id', { id })
+        .execute();
+      try {
+        await this.repo
+          .createQueryBuilder()
+          .update()
+          .set({ path: newPath })
+          .where('id = :id', { id })
+          .execute();
+        return;
+      } catch (err) {
+        // A watcher mint can land between the delete and the update.
+        const msg = (err as Error).message ?? '';
+        if (attempt >= 2 || !(msg.includes('UNIQUE') && msg.includes('path'))) throw err;
+      }
     }
   }
 

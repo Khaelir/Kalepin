@@ -109,6 +109,46 @@ export class OTService {
     return { content: session.content, revision: session.revision };
   }
 
+  /**
+   * Flush every open session at `path` or under `path/`, so the file a rename
+   * is about to move holds the latest edits. Errors propagate: if live edits
+   * can't be persisted, the rename should not go ahead.
+   */
+  async flushSessionsUnder(path: string): Promise<void> {
+    for (const docId of this.sessionManager.sessionIdsAtOrUnder(path)) {
+      await this.sessionManager.flushNow(docId);
+    }
+  }
+
+  /**
+   * Follow a rename of `src` to `dest` (file or folder): re-key every open
+   * session so later flushes write to the new path instead of resurrecting the
+   * old one. Sessions with no edits since the pre-move flush are reloaded from
+   * disk, because the move may have rewritten the file (attachment paths).
+   */
+  async renameSessions(
+    src: string,
+    dest: string,
+  ): Promise<Array<{ from: string; to: string; displaced: WebSocket[] }>> {
+    const renamed: Array<{ from: string; to: string; displaced: WebSocket[] }> = [];
+    for (const from of this.sessionManager.sessionIdsAtOrUnder(src)) {
+      const to = dest + from.slice(src.length);
+      const result = this.sessionManager.renameSession(from, to);
+      if (!result) continue;
+      const session = this.sessionManager.getSession(to);
+      if (session && !session.dirty) {
+        try {
+          const content = await this.storage.read(to);
+          if (content !== session.content) this.sessionManager.resetContent(to, content);
+        } catch {
+          // Unreadable right after the move — keep the in-memory content.
+        }
+      }
+      renamed.push({ from, to, displaced: result.displaced });
+    }
+    return renamed;
+  }
+
   async handleExternalWrite(docId: string): Promise<WebSocket[] | null> {
     const session = this.sessionManager.getSession(docId);
     if (!session) return null;
