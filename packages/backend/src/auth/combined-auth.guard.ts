@@ -1,11 +1,12 @@
 import { Injectable, CanActivate, ExecutionContext, UnauthorizedException, ForbiddenException, Optional, Inject, forwardRef } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { AuthService } from './auth.service';
+import { AuthService, type JwtPayload } from './auth.service';
 import { OAuthService } from './oauth/oauth.service';
 import { ACCESS_TOKEN_PREFIX } from './oauth/oauth-tokens';
 import { REQUIRED_SCOPE_KEY } from './required-scope.decorator';
 import { SCOPE_PERMISSIONS } from './permissions';
 import { setRequestUser } from './request-user';
+import { isAdmin } from './admin.util';
 import type { ApiKeyScope, Permission } from './permissions';
 
 @Injectable()
@@ -87,17 +88,28 @@ export class CombinedAuthGuard implements CanActivate {
       return true;
     }
 
-    // Fall back to JWT — full access, no scope check
+    // Fall back to JWT — a session acts with `rw` scope, or `admin` for
+    // ADMIN_EMAILS members. The scope is only used for the permission check
+    // here; request.user stays scope-less so MCP keeps treating sessions as
+    // non-admin.
+    let payload: JwtPayload;
     try {
-      const payload = this.authService.verifyToken(token);
+      payload = this.authService.verifyToken(token);
       const userId = await this.authService.ensureUser(payload);
       // Resolve sub to the persisted user.id (opaque JWT claim → canonical row).
       setRequestUser(request, { ...payload, sub: userId });
-      return true;
     } catch (err) {
       this.setMcpChallenge(request, response, true);
       throw err;
     }
+
+    if (requiredPermission) {
+      const scope: ApiKeyScope = isAdmin(payload.email) ? 'admin' : 'rw';
+      if (!SCOPE_PERMISSIONS[scope].includes(requiredPermission)) {
+        throw new ForbiddenException(`Insufficient scope: requires ${requiredPermission}`);
+      }
+    }
+    return true;
   }
 
   // Section 10: emit a WWW-Authenticate challenge on unauthenticated /mcp

@@ -99,7 +99,7 @@ test.describe('At-rest encryption — defaults (personal=ON, shared=OFF)', () =>
   });
 
   test('admin GET /api/admin/encryption reports per-zone state with personal=ON, shared=OFF', async () => {
-    const adminToken = makeToken('admin@kalepin.local');
+    const adminToken = makeToken('e2e-admin@kalepin.local');
     const res = await fetch(`${API}/api/admin/encryption`, {
       headers: { Authorization: `Bearer ${adminToken}` },
     });

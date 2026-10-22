@@ -75,6 +75,8 @@ export default defineConfig({
         STORAGE_ADAPTER: 'localfs',
         PORT: String(BACKEND_PORT),
         DOMAIN_ALLOWLIST: '*',
+        // Session tokens only reach /api/admin/* for ADMIN_EMAILS members.
+        ADMIN_EMAILS: 'e2e-admin@kalepin.local',
         LOG_LEVEL: 'warn',
         // Phase 4 leak-token harness needs an introspection surface
         // (route list, MCP tool list, notification counters). The backend

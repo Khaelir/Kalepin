@@ -232,16 +232,37 @@ describe('CombinedAuthGuard scope enforcement', () => {
     });
   });
 
-  describe('JWT bypasses scope check', () => {
-    it('allows any permission for JWT tokens', async () => {
+  describe('JWT session', () => {
+    it('allows every non-admin permission', async () => {
       const { guard, reflector } = makeGuard(
         { sub: 1, email: 'u@test.com', scope: 'ro' },
         { sub: 1, email: 'u@test.com' },
       );
-      reflector.get = () => 'admin:backup' as Permission;
-      const ctx = makeContext('jwt.token.here');
-      const result = await guard.canActivate(ctx as any);
-      assert.equal(result, true);
+      for (const perm of PERMISSIONS) {
+        if (perm.startsWith('admin:')) continue;
+        reflector.get = () => perm;
+        const result = await guard.canActivate(makeContext('jwt.token.here') as any);
+        assert.equal(result, true, `session should be allowed for ${perm}`);
+      }
+    });
+
+    it('rejects admin:* for a user outside ADMIN_EMAILS', async () => {
+      const previous = process.env.ADMIN_EMAILS;
+      process.env.ADMIN_EMAILS = 'admin@test.com';
+      try {
+        const { guard, reflector } = makeGuard(
+          { sub: 1, email: 'u@test.com', scope: 'ro' },
+          { sub: 1, email: 'u@test.com' },
+        );
+        reflector.get = () => 'admin:backup' as Permission;
+        await assert.rejects(
+          () => guard.canActivate(makeContext('jwt.token.here') as any),
+          (err: any) => err instanceof ForbiddenException,
+        );
+      } finally {
+        if (previous === undefined) delete process.env.ADMIN_EMAILS;
+        else process.env.ADMIN_EMAILS = previous;
+      }
     });
   });
 });

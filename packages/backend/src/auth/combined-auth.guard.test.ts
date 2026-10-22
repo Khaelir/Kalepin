@@ -1,10 +1,11 @@
 import 'reflect-metadata';
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, after } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { Reflector } from '@nestjs/core';
 import { UnauthorizedException, ForbiddenException, ExecutionContext } from '@nestjs/common';
 import { CombinedAuthGuard } from './combined-auth.guard';
 import { ACCESS_TOKEN_PREFIX } from './oauth/oauth-tokens';
+import { REQUIRED_SCOPE_KEY } from './required-scope.decorator';
 
 interface FakeRequest {
   headers: Record<string, string | undefined>;
@@ -19,14 +20,16 @@ interface FakeResponse {
   setHeader: (k: string, v: string) => void;
 }
 
-function makeContext(req: FakeRequest, res?: FakeResponse): ExecutionContext {
+function makeContext(req: FakeRequest, res?: FakeResponse, requiredScope?: string): ExecutionContext {
+  const handler = () => undefined;
+  if (requiredScope) Reflect.defineMetadata(REQUIRED_SCOPE_KEY, requiredScope, handler);
   return {
     switchToHttp: () => ({
       getRequest: () => req,
       getResponse: () => res,
       getNext: () => null as never,
     }),
-    getHandler: () => () => undefined,
+    getHandler: () => handler,
     getClass: () => class C {},
   } as unknown as ExecutionContext;
 }
@@ -126,5 +129,46 @@ describe('CombinedAuthGuard token-shape resolution', () => {
     const header = res.headers['WWW-Authenticate'];
     assert.ok(header);
     assert.doesNotMatch(header, /error=/);
+  });
+});
+
+describe('CombinedAuthGuard JWT session scope', () => {
+  const previousAdmins = process.env.ADMIN_EMAILS;
+  beforeEach(() => {
+    process.env.ADMIN_EMAILS = 'boss@x.com';
+  });
+  after(() => {
+    if (previousAdmins === undefined) delete process.env.ADMIN_EMAILS;
+    else process.env.ADMIN_EMAILS = previousAdmins;
+  });
+
+  const sessionStub: any = {
+    ...authServiceStub,
+    verifyToken: (token: string) => {
+      if (token === 'userjwt') return { sub: 7, email: 'jwt@x.com' };
+      if (token === 'adminjwt') return { sub: 8, email: 'Boss@x.com' };
+      throw new Error('bad jwt');
+    },
+  };
+
+  it('rejects a non-admin session on admin:* routes', async () => {
+    const guard = new CombinedAuthGuard(sessionStub, reflector);
+    for (const scope of ['admin:backup', 'admin:stats']) {
+      const req: FakeRequest = { headers: { authorization: 'Bearer userjwt' } };
+      await assert.rejects(guard.canActivate(makeContext(req, undefined, scope)), ForbiddenException);
+    }
+  });
+
+  it('allows an ADMIN_EMAILS session on admin:* routes', async () => {
+    const guard = new CombinedAuthGuard(sessionStub, reflector);
+    const req: FakeRequest = { headers: { authorization: 'Bearer adminjwt' } };
+    assert.equal(await guard.canActivate(makeContext(req, undefined, 'admin:backup')), true);
+  });
+
+  it('allows a non-admin session on rw routes and keeps request.user scope-less', async () => {
+    const guard = new CombinedAuthGuard(sessionStub, reflector);
+    const req: FakeRequest = { headers: { authorization: 'Bearer userjwt' } };
+    assert.equal(await guard.canActivate(makeContext(req, undefined, 'notes:delete')), true);
+    assert.deepEqual(req.user, { sub: 7, email: 'jwt@x.com' });
   });
 });
