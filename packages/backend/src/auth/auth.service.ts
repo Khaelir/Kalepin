@@ -10,10 +10,14 @@ import { ApiKey } from '../entities/api-key.entity';
 import { OAuthEventBus } from './oauth/oauth.events';
 import { canonicalizeEmail } from './email';
 import { resolveJwtSecret } from './jwt-secret';
+import { safeReturnPath } from './return-to';
 import { STORAGE_ADAPTER } from '../storage/storage-adapter.interface';
 import { RoutingStorageAdapter } from '../storage/routing-fs.adapter';
 
 import type { ApiKeyScope } from './permissions';
+
+/** Magic-link tokens are `randomUUID()` values. */
+const MAGIC_LINK_TOKEN_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export interface JwtPayload {
   sub: number;
@@ -78,7 +82,12 @@ export class AuthService implements OnModuleInit {
     const token = randomUUID();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
 
-    await this.tokenRepo.save({ email: canonical, token, expiresAt, returnTo: returnTo || undefined });
+    await this.tokenRepo.save({
+      email: canonical,
+      token,
+      expiresAt,
+      returnTo: returnTo ? safeReturnPath(returnTo) : undefined,
+    });
 
     const link = `${this.appUrl}/api/auth/verify?token=${token}`;
 
@@ -95,7 +104,12 @@ export class AuthService implements OnModuleInit {
     });
   }
 
-  async verifyMagicLink(token: string): Promise<{ sessionToken: string; returnTo?: string }> {
+  async verifyMagicLink(token: unknown): Promise<{ sessionToken: string; returnTo?: string }> {
+    // TypeORM drops `undefined` from a where clause, so a missing token would
+    // match the oldest unused link of any user.
+    if (typeof token !== 'string' || !MAGIC_LINK_TOKEN_RE.test(token)) {
+      throw new UnauthorizedException('Invalid or expired magic link');
+    }
     const record = await this.tokenRepo.findOne({ where: { token, used: false } });
     if (!record || record.expiresAt < new Date()) {
       throw new UnauthorizedException('Invalid or expired magic link');
