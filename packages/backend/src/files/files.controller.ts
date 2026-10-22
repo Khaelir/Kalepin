@@ -233,8 +233,11 @@ export class FilesController {
 
   @Get('history')
   @RequiredScope('notes:read')
-  async getHistory(@Query('path') path: string) {
+  async getHistory(@Query('path') path: string, @Req() req: Request & { user: JwtPayload }) {
     if (!path) throw new BadRequestException('path query parameter is required');
+    // History rows hold past note content, so they get the same gates as a read.
+    await this.pinService.assertUnlockedForRequest(req, path, req.user.email);
+    await this.filesService.assertReadable(path, req.user.email);
     return this.versionHistory.getHistory(path);
   }
 
@@ -243,11 +246,14 @@ export class FilesController {
   async getVersion(
     @Query('path') path: string,
     @Query('changeId') changeIdStr: string,
+    @Req() req: Request & { user: JwtPayload },
   ) {
     if (!path) throw new BadRequestException('path query parameter is required');
     if (!changeIdStr) throw new BadRequestException('changeId query parameter is required');
     const changeId = parseInt(changeIdStr, 10);
     if (isNaN(changeId)) throw new BadRequestException('changeId must be a number');
+    await this.pinService.assertUnlockedForRequest(req, path, req.user.email);
+    await this.filesService.assertReadable(path, req.user.email);
     return this.versionHistory.reconstructVersion(path, changeId);
   }
 
@@ -255,10 +261,12 @@ export class FilesController {
   @RequiredScope('notes:edit')
   async restoreVersion(
     @Body() body: { path: string; changeId: number },
-    @Req() req: { user: JwtPayload },
+    @Req() req: Request & { user: JwtPayload },
   ) {
     if (!body.path) throw new BadRequestException('path is required');
     if (!body.changeId) throw new BadRequestException('changeId is required');
+    await this.pinService.assertUnlockedForRequest(req, body.path, req.user.email);
+    await this.filesService.assertWritable(body.path, req.user.email);
 
     const { content: historicalContent, partial } = await this.versionHistory.reconstructVersion(body.path, body.changeId);
     if (partial) {
