@@ -163,3 +163,23 @@ describe('assertVaultWritableAndSyncable', () => {
     }
   });
 });
+
+describe('LocalFSAdapter — containment', () => {
+  it('rejects a sibling directory that shares the root as a string prefix', async () => {
+    const root = path.join(tmpRoot, 'vault');
+    await fs.mkdir(root, { recursive: true });
+    await fs.mkdir(`${root}-old`, { recursive: true });
+    await fs.writeFile(path.join(`${root}-old`, 'x.md'), 'outside');
+    const adapter = new LocalFSAdapter(root);
+    await assert.rejects(adapter.read('../vault-old/x.md'), /Path traversal detected/);
+  });
+
+  it('refuses to delete the storage root itself', async () => {
+    const root = path.join(tmpRoot, 'undeletable');
+    await fs.mkdir(path.join(root, 'alice@x.com'), { recursive: true });
+    const adapter = new LocalFSAdapter(root);
+    await assert.rejects(adapter.delete('alice@x.com/..'), /storage root/);
+    assert.equal(fsSync.existsSync(path.join(root, 'alice@x.com')), true);
+  });
+});
+

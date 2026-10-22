@@ -9,6 +9,7 @@ import {
   assertReadableBy,
   assertWritableBy,
   isPersonalRootSegment,
+  isCanonicalPath,
 } from './visibility';
 
 const ALICE = 'alice@example.com';
@@ -133,5 +134,42 @@ describe('isPersonalRootSegment', () => {
   it('false for shared paths', () => {
     assert.equal(isPersonalRootSegment('Notes/_users/x@y'), false);
     assert.equal(isPersonalRootSegment('Notes/foo.md'), false);
+  });
+});
+
+describe('isCanonicalPath', () => {
+  it('accepts the vault root and plain relative paths', () => {
+    assert.equal(isCanonicalPath(''), true);
+    assert.equal(isCanonicalPath('Notes/foo.md'), true);
+    assert.equal(isCanonicalPath('_users/alice@example.com/diary.md'), true);
+    assert.equal(isCanonicalPath('Notes/..hidden.md'), true);
+  });
+
+  it('rejects dot segments, empty segments, slashes at either end, backslash and NUL', () => {
+    for (const p of [
+      '_users/alice@example.com/../bob@example.com/diary.md',
+      '_users/alice@example.com/..',
+      './Notes/foo.md',
+      'Notes/./foo.md',
+      'Notes//foo.md',
+      '/Notes/foo.md',
+      'Notes/',
+      'Notes\\..\\foo.md',
+      'Notes/foo.md\0',
+    ]) {
+      assert.equal(isCanonicalPath(p), false, p);
+    }
+  });
+});
+
+describe('isVisibleTo — traversal', () => {
+  it('does not treat a path that climbs out of the viewer root as owned', () => {
+    assert.equal(isVisibleTo('_users/alice@example.com/../bob@example.com/diary.md', ALICE), false);
+    assert.equal(isVisibleTo('_users/alice@example.com/..', ALICE), false);
+  });
+
+  it('rejects non-canonical spellings of shared paths too', () => {
+    assert.equal(isVisibleTo('Notes//foo.md', ALICE), false);
+    assert.equal(isVisibleTo('Notes/../_users/bob@example.com/diary.md', ALICE), false);
   });
 });

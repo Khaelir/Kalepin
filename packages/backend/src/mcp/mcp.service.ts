@@ -646,7 +646,10 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         inputSchema: { path: z.string().optional().describe('Optional subdirectory path to filter') },
       },
       this.wrapTool('list_files', user, async ({ path }) => {
-        const tree = await this.filesService.listTree(path || '', user.email.toLowerCase());
+        // Agents often write folders as `Notes/` or `/Notes`; only the
+        // slashes are forgiven, dot segments still fail the visibility check.
+        const dir = (path || '').replace(/^\/+|\/+$/g, '');
+        const tree = await this.filesService.listTree(dir, user.email.toLowerCase());
         const paths = this.flattenPaths(tree);
         return { content: [{ type: 'text' as const, text: paths.join('\n') }] };
       }),

@@ -11,12 +11,27 @@ export function isUnderPersonalRoot(virtualPath: string): boolean {
 }
 
 /**
+ * True when `virtualPath` is spelled the one way storage will resolve it:
+ * no `.`/`..` or empty segments, no leading or trailing slash, no backslash,
+ * no NUL. `''` (the vault root) is canonical. Prefix-based ownership checks
+ * are only sound on canonical paths — `_users/alice/../bob/x.md` starts with
+ * alice's root but resolves into bob's folder.
+ */
+export function isCanonicalPath(virtualPath: string): boolean {
+  if (virtualPath === '') return true;
+  if (virtualPath.includes('\\') || virtualPath.includes('\0')) return false;
+  return virtualPath.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+}
+
+/**
  * Synchronous "owner-or-shared-vault" check. Returns true when the path is
  * shared (non-personal) or when it falls under the viewer's own personal root.
  * Foreign personal paths return false here regardless of grants — the
- * grant-aware variant lives in `GrantAwareVisibility`.
+ * grant-aware variant lives in `GrantAwareVisibility`. Non-canonical paths
+ * are never visible.
  */
 export function isVisibleTo(virtualPath: string, viewerEmail: string): boolean {
+  if (!isCanonicalPath(virtualPath)) return false;
   if (!isUnderPersonalRoot(virtualPath)) return true;
   const root = personalRootFor(viewerEmail);
   return virtualPath === root || virtualPath.startsWith(root + '/');

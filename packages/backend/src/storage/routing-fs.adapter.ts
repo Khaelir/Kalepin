@@ -10,6 +10,17 @@ export class CrossPersonalMoveError extends Error {
   }
 }
 
+/**
+ * Every personal folder lives side by side under one physical root, so a
+ * `..` that the filesystem collapses would cross from one user's folder into
+ * another's while still passing the root-level containment check.
+ */
+function assertNoDotSegments(inner: string): void {
+  if (inner.split('/').some((s) => s === '..' || s === '.')) {
+    throw new CrossPersonalMoveError('cannot route a personal path with dot segments');
+  }
+}
+
 type Routed = { adapter: LocalFSAdapter; physicalPath: string; namespace: 'shared' | 'personal' };
 
 export class RoutingStorageAdapter implements StorageAdapter {
@@ -30,6 +41,7 @@ export class RoutingStorageAdapter implements StorageAdapter {
       if (inner.startsWith('.deleted/') || inner === '.deleted') {
         throw new CrossPersonalMoveError('cannot route into .deleted');
       }
+      assertNoDotSegments(inner);
       return { adapter: this.personal, physicalPath: inner, namespace: 'personal' };
     }
     return { adapter: this.shared, physicalPath: virtualPath, namespace: 'shared' };
@@ -103,6 +115,8 @@ export class RoutingStorageAdapter implements StorageAdapter {
     if (srcPersonal && destPersonal) {
       const srcInner = src.slice(PERSONAL_PREFIX.length);
       const destInner = dest.slice(PERSONAL_PREFIX.length);
+      assertNoDotSegments(srcInner);
+      assertNoDotSegments(destInner);
       const srcEmail = srcInner.split('/')[0];
       const destEmail = destInner.split('/')[0];
       if (srcEmail !== destEmail) {
@@ -126,6 +140,7 @@ export class RoutingStorageAdapter implements StorageAdapter {
     }
     if (virtualPath.startsWith(PERSONAL_PREFIX)) {
       const inner = virtualPath.slice(PERSONAL_PREFIX.length);
+      assertNoDotSegments(inner);
       const entries = await this.personal.list(inner);
       return entries.map((e) => prefixEntry(e, PERSONAL_PREFIX));
     }

@@ -24,8 +24,11 @@ export class LocalFSAdapter implements StorageAdapter {
   }
 
   protected resolve(filePath: string): string {
-    const resolved = path.resolve(this.vaultPath, filePath);
-    if (!resolved.startsWith(this.vaultPath)) {
+    // Compare whole path segments: a bare `startsWith(vaultPath)` would also
+    // accept a sibling such as `/data/vault-old` for `/data/vault`.
+    const root = path.resolve(this.vaultPath);
+    const resolved = path.resolve(root, filePath);
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) {
       throw new Error('Path traversal detected');
     }
     return resolved;
@@ -88,6 +91,9 @@ export class LocalFSAdapter implements StorageAdapter {
 
   async delete(filePath: string): Promise<void> {
     const resolved = this.resolve(filePath);
+    if (resolved === path.resolve(this.vaultPath)) {
+      throw new Error('Refusing to delete the storage root');
+    }
     const stat = await fs.stat(resolved);
     if (stat.isDirectory()) {
       await fs.rm(resolved, { recursive: true });
