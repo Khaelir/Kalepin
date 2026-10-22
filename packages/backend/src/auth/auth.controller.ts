@@ -10,6 +10,7 @@ import { SCOPE_PERMISSIONS, PERMISSIONS } from './permissions';
 import type { ApiKeyScope } from './permissions';
 import { isAdmin } from './admin.util';
 import { canonicalizeEmail } from './email';
+import { safeReturnPath } from './return-to';
 import { SlidingWindowRateLimiter } from './oauth/rate-limit';
 import { User } from '../entities/user.entity';
 
@@ -53,9 +54,9 @@ export class AuthController {
   @Get('auth/verify')
   async verifyMagicLink(@Query('token') token: string, @Res() res: Response) {
     const { sessionToken, returnTo } = await this.authService.verifyMagicLink(token);
-    // Only allow relative paths to prevent open-redirect
-    const path = returnTo && returnTo.startsWith('/') ? returnTo : '/';
-    res.redirect(`${path}?token=${sessionToken}`);
+    // Re-checked here as well as on storage: rows written before the check
+    // existed may still hold an off-origin target.
+    res.redirect(`${safeReturnPath(returnTo)}?token=${sessionToken}`);
   }
 
   @Post('auth/api-keys')
