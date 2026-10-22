@@ -13,6 +13,7 @@ export {
   PERSONAL_PREFIX,
   personalRootFor,
   isUnderPersonalRoot,
+  isCanonicalPath,
   isVisibleTo,
   assertReadableBy,
   assertWritableBy,

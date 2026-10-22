@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { GrantsService } from '../grants/grants.service';
-import { isVisibleTo, isUnderPersonalRoot, Visibility } from './visibility';
+import { isCanonicalPath, isVisibleTo, isUnderPersonalRoot, Visibility } from './visibility';
 
 /**
  * Async resolver that layers grants on top of the sync ownership check.
@@ -14,6 +14,7 @@ export class GrantAwareVisibility {
   constructor(@Optional() private readonly grants?: GrantsService) {}
 
   async visibilityFor(path: string, viewerEmail: string): Promise<Visibility> {
+    if (!isCanonicalPath(path)) return { kind: 'denied' };
     if (isVisibleTo(path, viewerEmail)) return { kind: 'owner' };
     if (this.grants && isUnderPersonalRoot(path)) {
       const grant = await this.grants.findActive(path, viewerEmail);

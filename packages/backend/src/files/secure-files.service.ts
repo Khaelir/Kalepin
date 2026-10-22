@@ -15,7 +15,7 @@ import { PinService } from '../pin';
 import { FilesService } from './files.service';
 import { canonicalizeEmail } from '../auth/email';
 import { resolveJwtSecret } from '../auth/jwt-secret';
-import { personalRootFor, isUnderPersonalRoot } from '../auth/visibility';
+import { personalRootFor, isUnderPersonalRoot, isCanonicalPath } from '../auth/visibility';
 import {
   hasEnvelopeMagic,
   parseHeader,
@@ -214,7 +214,7 @@ export class SecureFilesService {
 
   private assertOwnedNonSecure(p: string, email: string): void {
     const root = personalRootFor(email);
-    if (!isUnderPersonalRoot(p) || !(p === root || p.startsWith(root + '/'))) {
+    if (!isCanonicalPath(p) || !isUnderPersonalRoot(p) || !(p === root || p.startsWith(root + '/'))) {
       throw new ForbiddenException(`path "${p}" is not owned by ${email}`);
     }
     if (isE2EPath(p)) {
@@ -224,7 +224,7 @@ export class SecureFilesService {
 
   private assertOwnedSecure(p: string, email: string): void {
     const root = personalRootFor(email);
-    if (!isUnderPersonalRoot(p) || !(p === root || p.startsWith(root + '/'))) {
+    if (!isCanonicalPath(p) || !isUnderPersonalRoot(p) || !(p === root || p.startsWith(root + '/'))) {
       throw new ForbiddenException(`path "${p}" is not owned by ${email}`);
     }
     if (!isE2EPath(p)) {

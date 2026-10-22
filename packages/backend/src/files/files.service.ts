@@ -14,6 +14,7 @@ import {
   PERSONAL_PREFIX,
   isPersonalRootSegment,
   isUnderPersonalRoot,
+  isCanonicalPath,
   isVisibleTo,
   personalRootFor,
 } from '../auth/visibility';
@@ -74,12 +75,12 @@ export class FilesService extends EventEmitter {
     }
   }
 
-  private async assertReadable(filePath: string, userEmail: string): Promise<void> {
+  async assertReadable(filePath: string, userEmail: string): Promise<void> {
     if (this.visibility) return this.visibility.assertReadableBy(filePath, userEmail);
     if (!isVisibleTo(filePath, userEmail)) throw new NotFoundException();
   }
 
-  private async assertWritable(filePath: string, userEmail: string): Promise<void> {
+  async assertWritable(filePath: string, userEmail: string): Promise<void> {
     if (this.visibility) return this.visibility.assertWritableBy(filePath, userEmail);
     if (!isVisibleTo(filePath, userEmail)) throw new NotFoundException();
   }
@@ -472,6 +473,8 @@ export class FilesService extends EventEmitter {
       // Listing the bare _users directory exposes nothing (no user knows of others).
       return [];
     }
+
+    if (dir !== '/' && !isCanonicalPath(dir)) throw new NotFoundException();
 
     if (isUnderPersonalRoot(dir)) {
       const root = personalRootFor(userEmail);

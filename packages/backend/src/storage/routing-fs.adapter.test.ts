@@ -261,3 +261,24 @@ describe('RoutingStorageAdapter — softDeletePersonalFolder', () => {
     assert.match(dest!, /^\.deleted\/alice@x\.com-/);
   });
 });
+
+describe('RoutingStorageAdapter — dot segments', () => {
+  it('refuses personal paths that would climb into another user folder', async () => {
+    await routing.ensurePersonalFolder('alice@x.com');
+    await routing.ensurePersonalFolder('bob@x.com');
+    await routing.write('_users/bob@x.com/secret.md', 'bob only');
+    const traversal = '_users/alice@x.com/../bob@x.com/secret.md';
+
+    await assert.rejects(routing.read(traversal), CrossPersonalMoveError);
+    await assert.rejects(routing.write(traversal, 'overwritten'), CrossPersonalMoveError);
+    await assert.rejects(routing.delete('_users/alice@x.com/..'), CrossPersonalMoveError);
+    await assert.rejects(routing.list('_users/alice@x.com/..'), CrossPersonalMoveError);
+    await assert.rejects(
+      routing.move('_users/alice@x.com/a.md', '_users/alice@x.com/../bob@x.com/a.md'),
+      CrossPersonalMoveError,
+    );
+    assert.equal(await routing.exists(traversal), false);
+    assert.equal(await routing.read('_users/bob@x.com/secret.md'), 'bob only');
+  });
+});
+
