@@ -18,7 +18,7 @@ services:
       - DB_PATH=/data/db/kalepin.sqlite
       # REQUIRED: generate with `openssl rand -hex 32` and replace before first boot.
       # The backend refuses to start in production with this placeholder or any value < 32 chars.
-      - JWT_SECRET=8705d13e8aeb758970b22d8b2351a346abee48354ec93813c2716eeca4fe7d88
+      - JWT_SECRET=change-me-in-production
       - JWT_EXPIRY=7d
       - DOMAIN_ALLOWLIST=*
       # Admin emails (comma-separated, for admin API key scope)
