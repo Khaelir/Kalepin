@@ -1145,6 +1145,15 @@ export async function removeNotePin(path: string): Promise<void> {
   throw new Error('Failed to remove PIN');
 }
 
+// Unlock tokens from successful PIN verifies, kept in memory only. The
+// WebSocket was opened before the unlock cookie existed, so doc:open frames
+// carry the token instead.
+const pinUnlockTokens = new Map<string, string>();
+
+export function getPinUnlockToken(path: string): string | undefined {
+  return pinUnlockTokens.get(path);
+}
+
 /**
  * Verify a PIN. On success the server sets an HttpOnly cookie that subsequent
  * fetches automatically present. On failure, throws a typed error so callers
@@ -1169,7 +1178,9 @@ export async function verifyNotePin(path: string, pin: string): Promise<{ expire
     throw new Error(data?.message || 'Invalid PIN');
   }
   if (!res.ok) throw new Error(`Verify failed (${res.status})`);
-  return res.json();
+  const data: { expiresIn?: number; token?: string } = await res.json();
+  if (data.token) pinUnlockTokens.set(path, data.token);
+  return { expiresIn: data.expiresIn };
 }
 
 // Document grants — per-file user-to-user permission grants

@@ -761,7 +761,7 @@ export function App() {
     if (wsRef.current) {
       await wsRef.current.ready;
       console.debug(`[App.openFile] Sending doc:open via WS for "${path}"`);
-      wsRef.current.send({ type: 'doc:open', docId: path });
+      wsRef.current.send({ type: 'doc:open', docId: path, unlock: api.getPinUnlockToken(path) });
 
       const cleanup: Array<() => void> = [];
       const finish = () => { resolved = true; for (const off of cleanup) off(); };

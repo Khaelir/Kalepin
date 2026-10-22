@@ -303,6 +303,24 @@ export class PinService {
     return this.assertUnlocked(path, viewer, cookieToken, headerToken ?? null);
   }
 
+  /**
+   * WebSocket counterpart of `assertUnlockedForRequest`. Frames carry no
+   * cookies, so the gateway passes the cookie header captured at the upgrade
+   * plus an optional unlock token sent with the frame. True when the path has
+   * no PIN or either credential validates.
+   */
+  async isUnlockedFor(
+    path: string,
+    viewer: string,
+    cookieHeader: string | undefined,
+    token: unknown,
+  ): Promise<boolean> {
+    if (!(await this.hasPin(path))) return true;
+    const cookieToken = parseCookies(cookieHeader)[pinCookieName(path)];
+    if (cookieToken && this.validateUnlockToken(cookieToken, path, viewer)) return true;
+    return typeof token === 'string' && !!this.validateUnlockToken(token, path, viewer);
+  }
+
   /** Owner-only listing for Settings → Security. */
   async listLockedFor(owner: string): Promise<{ path: string; pinSetAt: number | null }[]> {
     const rows = await this.repo
