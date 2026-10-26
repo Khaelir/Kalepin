@@ -60,7 +60,7 @@ function makeFakeReq(sessionId: string) {
 
 function makeMcpServiceWithStub() {
   const stats = makeStatsServiceStub();
-  // Constructor order: files, search, comments, changeTracking, stats, ot, attachments, encryptionPredicates, pinService, backup?
+  // Constructor order: files, search, comments, changeTracking, stats, ot, attachments, encryptionPredicates, pinService, visibility, docHandles, backup?, oauthEvents?
   const service = new McpService(
     null as any,
     null as any,
@@ -88,6 +88,7 @@ function makeMcpServiceWithStub() {
       assertCommentableBy: async () => {},
       visibleGrantSet: async () => new Set<string>(),
     } as any,
+    null as any,
   );
   return { service, stats };
 }

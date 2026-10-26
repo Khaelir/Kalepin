@@ -23,6 +23,11 @@ import {
   EncryptionPredicates,
 } from '../crypto/encryption-predicates';
 import { PinService } from '../pin';
+import { DocHandlesService, type ResolveResult } from '../doc-handles';
+
+/** Shared schema text for the `id` argument every note-targeting tool accepts. */
+const NOTE_ID_DESCRIPTION =
+  'Stable note id, as returned by search_notes, read_note, create_note or list_files. Unlike the path, it survives renames and moves. Pass either path or id; id wins if both are given.';
 
 interface McpSession {
   transport: StreamableHTTPServerTransport;
@@ -80,6 +85,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     private readonly encryptionPredicates: EncryptionPredicates,
     private readonly pinService: PinService,
     private readonly visibility: GrantAwareVisibility,
+    private readonly docHandles: DocHandlesService,
     @Optional() private readonly backupService?: BackupService,
     @Optional() private readonly oauthEvents?: OAuthEventBus,
   ) {
@@ -187,7 +193,6 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     throw new Error(`pin-protected: ${path}`);
   }
 
-  /** Build an app URL for a note, optionally targeting a specific comment thread. */
   /**
    * Detect draw.io SVG attachments referenced in markdown.
    * Returns metadata about each diagram and the content with SVG references
@@ -226,10 +231,10 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     return { attachments, content };
   }
 
-  private buildNoteUrl(filePath: string, threadId?: string): string {
-    const encoded = filePath.split('/').map(encodeURIComponent).join('/');
+  /** Build an app URL for a note, optionally targeting a specific comment thread. */
+  private buildNoteUrl(noteId: string, threadId?: string): string {
     const query = threadId ? `?thread=${encodeURIComponent(threadId)}` : '';
-    return `${this.appUrl}/doc/${encoded}${query}`;
+    return `${this.appUrl}/doc/${noteId}${query}`;
   }
 
   async handleRequest(
@@ -450,18 +455,20 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     server.registerTool(
       'search_notes',
       {
-        description: 'Search across all notes and comments using full-text and semantic search. Results may include comments (type: "comment") with full thread text — comments often contain important context, decisions, or metadata not present in the note body.',
+        description: 'Search across all notes and comments using full-text and semantic search. Results may include comments (type: "comment") with full thread text — comments often contain important context, decisions, or metadata not present in the note body. Each result carries the note\'s stable `id`, which other tools accept in place of `path`.',
         inputSchema: { query: z.string().describe('Search query') },
       },
       this.wrapTool('search_notes', user, async ({ query }) => {
         const results = await this.searchService.search(query, 'mcp', user.email.toLowerCase());
+        const ids = await this.docHandles.findOrCreateForPaths(results.map((r) => r.path));
         // Replace any PIN-locked result with a sentinel so callers see the
         // path exists but cannot read its body.
         const filtered = await Promise.all(results.map(async (r) => {
+          const id = ids.get(r.path)!;
           if (await this.pinReadSentinel(r.path, user)) {
-            return { path: r.path, kind: 'pin-protected' as const };
+            return { path: r.path, id, kind: 'pin-protected' as const };
           }
-          return r;
+          return { ...r, id };
         }));
         return { content: [{ type: 'text' as const, text: JSON.stringify(filtered) }], _logOpts: { resultCount: filtered.length } };
       }),
@@ -472,17 +479,18 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       {
         description: 'Read the markdown content of a note, including comment threads. Use maxLength to get an outline preview for long notes instead of full content.',
         inputSchema: {
-          path: z.string().describe('Path to the note (e.g. "projects/design.md")'),
+          path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
           maxLength: z.number().int().positive().optional().describe('Max content length in chars. If content exceeds this, returns heading outline + first paragraph instead of full content.'),
           include_resolved: z.boolean().optional().describe('Include resolved comment threads (default: false)'),
         },
       },
-      this.wrapTool('read_note', user, async ({ path, maxLength, include_resolved }) => {
+      this.wrapTool('read_note', user, async ({ path, id, maxLength, include_resolved }) => {
         const email = user.email.toLowerCase();
-        const resolved = await this.resolveNotePath(path, email);
+        const resolved = await this.resolveNoteRef({ path, id }, email);
 
         if (resolved.length === 0) {
-          return { content: [{ type: 'text' as const, text: `No notes found matching "${path}".` }] };
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id ?? path}".` }] };
         }
 
         if (resolved.length > 1) {
@@ -491,7 +499,6 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         }
 
         const notePath = resolved[0].path;
-        const noteUrl = this.buildNoteUrl(notePath);
 
         const pinSentinel = await this.pinReadSentinel(notePath, user);
         if (pinSentinel) return pinSentinel;
@@ -512,6 +519,8 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
 
         const rawContent = await this.filesService.readFile(notePath, email);
         const contentHash = this.filesService.computeContentHash(rawContent);
+        const noteId = await this.docHandles.findOrCreateForPath(notePath);
+        const noteUrl = this.buildNoteUrl(noteId);
 
         // Detect draw.io diagrams: replace SVG refs with placeholders, collect metadata
         const { attachments, content } = await this.detectDrawioDiagrams(rawContent);
@@ -531,15 +540,15 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           const firstParagraph = content.split(/\n\n/)[0]?.slice(0, maxLength) || '';
           const outline = headings.length > 0 ? headings.join('\n') : content.slice(0, maxLength);
 
-          const headerLines = [
-            `contentHash: ${contentHash}`,
+          const headerLines = [`path: ${notePath}`, `id: ${noteId}`, `contentHash: ${contentHash}`];
+          if (attachments.length > 0) {
+            headerLines.push(`attachments: ${JSON.stringify(attachments)}`);
+          }
+          headerLines.push(
             `fullLength: ${content.length}`,
             `[Open in Kalepin](${noteUrl})`,
-          ];
-          if (attachments.length > 0) {
-            headerLines.splice(1, 0, `attachments: ${JSON.stringify(attachments)}`);
-          }
-          headerLines.push(`comments: ${JSON.stringify(commentSummary)}`);
+            `comments: ${JSON.stringify(commentSummary)}`,
+          );
           const header = headerLines.join('\n');
 
           const previewBody = headings.length > 0
@@ -550,7 +559,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         }
 
         // Full mode
-        const headerLines = [`contentHash: ${contentHash}`];
+        const headerLines = [`path: ${notePath}`, `id: ${noteId}`, `contentHash: ${contentHash}`];
         if (attachments.length > 0) {
           headerLines.push(`attachments: ${JSON.stringify(attachments)}`);
         }
@@ -559,7 +568,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
 
         if (threads.length > 0) {
           const commentSection = threads.map((t) => {
-            const threadUrl = this.buildNoteUrl(notePath, t.id);
+            const threadUrl = this.buildNoteUrl(noteId, t.id);
             const status = t.resolved ? ' (resolved)' : '';
             const quoted = t.quotedText ? `> ${t.quotedText}\n` : '';
             const msgs = t.comments.map((c) => `  - **${c.author}** (${c.createdAt}): ${c.text}`).join('\n');
@@ -577,20 +586,21 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       {
         description: 'Read a diagram attachment in a structured format. Returns a graph representation (nodes and edges) for draw.io diagrams. Use this after read_note reveals [diagram: X (draw.io)] placeholders to understand diagram topology.',
         inputSchema: {
-          notePath: z.string().describe('Path to the note that references the attachment'),
+          notePath: z.string().optional().describe('Path to the note that references the attachment'),
+          noteId: z.string().optional().describe('Stable id of that note, usable in place of notePath; wins if both are given'),
           attachmentId: z.string().describe('Attachment filename (e.g. "flow.svg")'),
           format: z.enum(['structured', 'image']).optional().describe('Output format: "structured" (default) returns graph JSON, "image" is reserved for future use'),
         },
         annotations: { readOnlyHint: true },
       },
-      this.wrapTool('read_attachment', user, async ({ notePath, attachmentId, format }) => {
+      this.wrapTool('read_attachment', user, async ({ notePath, noteId, attachmentId, format }) => {
         const email = user.email.toLowerCase();
         // Verify the note exists and references this attachment
-        const resolved = await this.resolveNotePath(notePath, email);
+        const resolved = await this.resolveNoteRef({ path: notePath, id: noteId }, email);
         if (resolved.length === 0) {
-          return { content: [{ type: 'text' as const, text: `No notes found matching "${notePath}".` }] };
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${noteId ?? notePath}".` }] };
         }
-        const resolvedPath = resolved.length === 1 ? resolved[0].path : notePath;
+        const resolvedPath = resolved.length === 1 ? resolved[0].path : notePath!;
         if (this.encryptionPredicates.isE2EEncrypted(resolvedPath)) {
           return {
             content: [
@@ -643,15 +653,22 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       'list_files',
       {
         description: 'List all note paths. Returns a flat newline-separated list of file paths.',
-        inputSchema: { path: z.string().optional().describe('Optional subdirectory path to filter') },
+        inputSchema: {
+          path: z.string().optional().describe('Optional subdirectory path to filter'),
+          include_ids: z.boolean().optional().describe('Append each file\'s stable id, making each line "<path>\\t<id>" (default: false)'),
+        },
       },
-      this.wrapTool('list_files', user, async ({ path }) => {
+      this.wrapTool('list_files', user, async ({ path, include_ids }) => {
         // Agents often write folders as `Notes/` or `/Notes`; only the
         // slashes are forgiven, dot segments still fail the visibility check.
         const dir = (path || '').replace(/^\/+|\/+$/g, '');
         const tree = await this.filesService.listTree(dir, user.email.toLowerCase());
         const paths = this.flattenPaths(tree);
-        return { content: [{ type: 'text' as const, text: paths.join('\n') }] };
+        if (!include_ids) {
+          return { content: [{ type: 'text' as const, text: paths.join('\n') }] };
+        }
+        const ids = await this.docHandles.findOrCreateForPaths(paths);
+        return { content: [{ type: 'text' as const, text: paths.map((p) => `${p}\t${ids.get(p)}`).join('\n') }] };
       }),
     );
 
@@ -668,9 +685,13 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         },
       },
       this.wrapTool('create_note', user, async ({ path, content }) => {
-        await this.assertPinUnlockedForWrite(path, user);
-        await this.filesService.createFile(path, content, user.sub, undefined, user.email.toLowerCase());
-        return { content: [{ type: 'text' as const, text: `Created note: ${path}` }] };
+        // createFile appends `.md` when missing; check the PIN of, and mint the
+        // id for, the path it actually writes.
+        const writtenPath = path.endsWith('.md') ? path : `${path}.md`;
+        await this.assertPinUnlockedForWrite(writtenPath, user);
+        await this.filesService.createFile(writtenPath, content, user.sub, undefined, user.email.toLowerCase());
+        const id = await this.docHandles.findOrCreateForPath(writtenPath);
+        return { content: [{ type: 'text' as const, text: `Created note: ${writtenPath} (id: ${id})` }] };
       }),
     );
 
@@ -679,17 +700,18 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       {
         description: 'Search-and-replace edit on a note. Finds exactly one occurrence of old_text and replaces it with new_text. Fails safely if not found or ambiguous. Use this for small/targeted edits instead of edit_note.',
         inputSchema: {
-          path: z.string().describe('Path to the note (e.g. "projects/design.md")'),
+          path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
           old_text: z.string().describe('Exact text to find (must match exactly once)'),
           new_text: z.string().describe('Replacement text (empty string to delete)'),
           base_hash: z.string().optional().describe('Content hash from read_note for conflict detection'),
         },
       },
-      this.wrapTool('patch_note', user, async ({ path, old_text, new_text, base_hash }) => {
+      this.wrapTool('patch_note', user, async ({ path, id, old_text, new_text, base_hash }) => {
         const email = user.email.toLowerCase();
-        const resolved = await this.resolveNotePath(path, email);
+        const resolved = await this.resolveNoteRef({ path, id }, email);
         if (resolved.length === 0) {
-          return { content: [{ type: 'text' as const, text: `No notes found matching "${path}".` }] };
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id ?? path}".` }] };
         }
         if (resolved.length > 1) {
           const listing = resolved.map((r) => `- ${r.path}`).join('\n');
@@ -707,17 +729,18 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       {
         description: 'Append content to the end of an existing note without reading or rewriting the full document. Ideal for adding new sections, list items, or log entries.',
         inputSchema: {
-          path: z.string().describe('Path to the note (e.g. "projects/design.md")'),
+          path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
           content: z.string().describe('Content to append'),
           separator: z.string().optional().describe('Separator between existing content and appended content (default: "\\n\\n")'),
           base_hash: z.string().optional().describe('Content hash from read_note for conflict detection'),
         },
       },
-      this.wrapTool('append_to_note', user, async ({ path, content, separator, base_hash }) => {
+      this.wrapTool('append_to_note', user, async ({ path, id, content, separator, base_hash }) => {
         const email = user.email.toLowerCase();
-        const resolved = await this.resolveNotePath(path, email);
+        const resolved = await this.resolveNoteRef({ path, id }, email);
         if (resolved.length === 0) {
-          return { content: [{ type: 'text' as const, text: `No notes found matching "${path}". Use create_note to create a new one.` }] };
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id ?? path}". Use create_note to create a new one.` }] };
         }
         if (resolved.length > 1) {
           const listing = resolved.map((r) => `- ${r.path}`).join('\n');
@@ -735,16 +758,17 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       {
         description: 'Replace the full content of an existing note. For small or targeted edits, prefer patch_note (search-and-replace) which is faster and safer. Use edit_note only when you need to completely rewrite a note.',
         inputSchema: {
-          path: z.string().describe('Path to the note to edit'),
+          path: z.string().optional().describe('Path to the note to edit'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
           content: z.string().describe('New markdown content'),
           base_hash: z.string().optional().describe('Content hash from read_note for conflict detection'),
         },
       },
-      this.wrapTool('edit_note', user, async ({ path, content, base_hash }) => {
+      this.wrapTool('edit_note', user, async ({ path, id, content, base_hash }) => {
         const email = user.email.toLowerCase();
-        const resolved = await this.resolveNotePath(path, email);
+        const resolved = await this.resolveNoteRef({ path, id }, email);
         if (resolved.length === 0) {
-          return { content: [{ type: 'text' as const, text: `No notes found matching "${path}". Use create_note to create a new one.` }] };
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id ?? path}". Use create_note to create a new one.` }] };
         }
         if (resolved.length > 1) {
           const listing = resolved.map((r) => `- ${r.path}`).join('\n');
@@ -761,14 +785,17 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       'delete_note',
       {
         description: 'Delete a note',
-        inputSchema: { path: z.string().describe('Path to the note to delete') },
+        inputSchema: {
+          path: z.string().optional().describe('Path to the note to delete'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
+        },
         annotations: { destructiveHint: true },
       },
-      this.wrapTool('delete_note', user, async ({ path }) => {
+      this.wrapTool('delete_note', user, async ({ path, id }) => {
         const email = user.email.toLowerCase();
-        const resolved = await this.resolveNotePath(path, email);
+        const resolved = await this.resolveNoteRef({ path, id }, email);
         if (resolved.length === 0) {
-          return { content: [{ type: 'text' as const, text: `No notes found matching "${path}".` }] };
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id ?? path}".` }] };
         }
         if (resolved.length > 1) {
           const listing = resolved.map((r) => `- ${r.path}`).join('\n');
@@ -786,13 +813,19 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       'list_comments',
       {
         description: 'List all comment threads on a note. Comments often contain important context, decisions, or metadata not in the note itself. Also returned by read_note, but use this tool when you need structured comment data.',
-        inputSchema: { path: z.string().describe('Path to the note') },
+        inputSchema: {
+          path: z.string().optional().describe('Path to the note'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
+        },
         annotations: { readOnlyHint: true },
       },
-      this.wrapTool('list_comments', user, async ({ path }) => {
+      this.wrapTool('list_comments', user, async ({ path, id }) => {
         const email = user.email.toLowerCase();
-        const resolved = await this.resolveNotePath(path, email);
-        const resolvedPath = resolved.length === 1 ? resolved[0].path : path;
+        const resolved = await this.resolveNoteRef({ path, id }, email);
+        if (id && resolved.length === 0) {
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id}".` }] };
+        }
+        const resolvedPath = resolved.length === 1 ? resolved[0].path : path!;
         // Gate before fetching: existence is not observable for foreign personal paths.
         await this.visibility.assertReadableBy(resolvedPath, email);
         if (this.encryptionPredicates.isE2EEncrypted(resolvedPath)) {
@@ -806,9 +839,12 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           };
         }
         const comments = await this.commentsService.getComments(resolvedPath);
+        // Only mint when there is a thread to link: an unmatched path falls
+        // through to here and must not leave a handle behind.
+        const noteId = comments.length > 0 ? await this.docHandles.findOrCreateForPath(resolvedPath) : '';
         const enriched = comments.map((t) => ({
           ...t,
-          url: this.buildNoteUrl(resolvedPath, t.id),
+          url: this.buildNoteUrl(noteId, t.id),
         }));
         return { content: [{ type: 'text' as const, text: JSON.stringify(enriched) }] };
       }),
@@ -822,7 +858,8 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       {
         description: 'Add a comment to a note. If threadId is provided, replies to an existing thread instead of creating a new one. Use quotedText to anchor the comment to specific text in the document.',
         inputSchema: {
-          path: z.string().describe('Path to the note'),
+          path: z.string().optional().describe('Path to the note'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
           content: z.string().describe('Comment text'),
           blockId: z.string().optional().describe('Block ID to attach the comment to (defaults to a new UUID)'),
           threadId: z.string().optional().describe('Thread ID to reply to. If provided, adds a reply to the existing thread instead of creating a new one.'),
@@ -833,10 +870,13 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           }).optional().describe('Character offset range (from/to) of the quoted text in the document. Optional but helps position the comment precisely.'),
         },
       },
-      this.wrapTool('add_comment', user, async ({ path, content, blockId, threadId, quotedText, positionHint }) => {
+      this.wrapTool('add_comment', user, async ({ path, id, content, blockId, threadId, quotedText, positionHint }) => {
         const email = user.email.toLowerCase();
-        const resolved = await this.resolveNotePath(path, email);
-        const resolvedPath = resolved.length === 1 ? resolved[0].path : path;
+        const resolved = await this.resolveNoteRef({ path, id }, email);
+        if (id && resolved.length === 0) {
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id}".` }] };
+        }
+        const resolvedPath = resolved.length === 1 ? resolved[0].path : path!;
         await this.visibility.assertCommentableBy(resolvedPath, email);
         if (threadId) {
           await this.commentsService.replyToThread(resolvedPath, blockId || 'default', threadId, user.email, content);
@@ -853,16 +893,20 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       {
         description: 'Resolve or unresolve a comment thread on a note.',
         inputSchema: {
-          path: z.string().describe('Path to the note'),
+          path: z.string().optional().describe('Path to the note'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
           threadId: z.string().describe('Thread ID to resolve or unresolve'),
           blockId: z.string().optional().describe('Block ID the thread belongs to (defaults to "default")'),
           resolved: z.boolean().optional().describe('Whether to resolve (true) or unresolve (false). Defaults to true.'),
         },
       },
-      this.wrapTool('resolve_comment', user, async ({ path, threadId, blockId, resolved }) => {
+      this.wrapTool('resolve_comment', user, async ({ path, id, threadId, blockId, resolved }) => {
         const email = user.email.toLowerCase();
-        const matches = await this.resolveNotePath(path, email);
-        const resolvedPath = matches.length === 1 ? matches[0].path : path;
+        const matches = await this.resolveNoteRef({ path, id }, email);
+        if (id && matches.length === 0) {
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id}".` }] };
+        }
+        const resolvedPath = matches.length === 1 ? matches[0].path : path!;
         await this.visibility.assertCommentableBy(resolvedPath, email);
         await this.commentsService.resolveThread(resolvedPath, blockId || 'default', threadId, resolved ?? true);
         const action = (resolved ?? true) ? 'Resolved' : 'Unresolved';
@@ -1176,6 +1220,40 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     );
 
     return server;
+  }
+
+  /**
+   * Resolve a tool's `{ path, id }` input to matching note(s). An id is exact:
+   * it resolves to the note's current path or to nothing. A path goes through
+   * the fuzzy matching of resolveNotePath.
+   */
+  private async resolveNoteRef(
+    ref: { path?: string; id?: string },
+    userEmail: string,
+  ): Promise<{ path: string; snippet: string }[]> {
+    if (ref.id) {
+      const path = await this.pathForNoteId(ref.id, userEmail);
+      return path ? [{ path, snippet: '' }] : [];
+    }
+    if (!ref.path) throw new Error('Provide either a note path or an id.');
+    return this.resolveNotePath(ref.path, userEmail);
+  }
+
+  /**
+   * Map a note id to its current path. Unknown ids and ids of notes the caller
+   * cannot read both come back null, so an id never reveals that a foreign
+   * note exists. Visibility is checked before the tombstone for the same reason.
+   */
+  private async pathForNoteId(id: string, userEmail: string): Promise<string | null> {
+    let handle: ResolveResult;
+    try {
+      handle = await this.docHandles.resolve(id);
+      await this.visibility.assertReadableBy(handle.path, userEmail);
+    } catch {
+      return null;
+    }
+    if (handle.tombstoned) throw new Error(`Note ${id} has been deleted.`);
+    return handle.path;
   }
 
   /**

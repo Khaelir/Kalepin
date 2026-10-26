@@ -8,6 +8,7 @@ import { BackupModule } from '../backup/backup.module';
 import { StatsModule } from '../stats/stats.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
 import { OTModule } from '../ot';
+import { DocHandlesModule } from '../doc-handles';
 import { McpController } from './mcp.controller';
 import { McpService } from './mcp.service';
 
@@ -22,6 +23,7 @@ import { McpService } from './mcp.service';
     StatsModule,
     AttachmentsModule,
     OTModule,
+    DocHandlesModule,
     ...(process.env.S3_BACKUP_BUCKET ? [BackupModule] : []),
   ],
   controllers: [McpController],

@@ -72,6 +72,41 @@ describe('DocHandlesService.findOrCreateForPath', () => {
   });
 });
 
+describe('DocHandlesService.findOrCreateForPaths', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('returns existing ids and mints the missing ones', async () => {
+    const existing = await service.findOrCreateForPath('Notes/A.md');
+    const ids = await service.findOrCreateForPaths(['Notes/A.md', 'Notes/B.md']);
+    assert.equal(ids.get('Notes/A.md'), existing);
+    assert.match(ids.get('Notes/B.md')!, /^[A-Z2-7]{16}$/);
+    assert.equal(await service.forPath('Notes/B.md'), ids.get('Notes/B.md'));
+  });
+
+  it('dedupes repeated paths into a single row', async () => {
+    const ids = await service.findOrCreateForPaths(['Notes/A.md', 'Notes/A.md']);
+    assert.equal(ids.size, 1);
+    assert.equal((await repo.find({ where: { path: 'Notes/A.md' } })).length, 1);
+  });
+
+  it('reactivates a tombstoned row instead of minting a second one', async () => {
+    const id = await service.findOrCreateForPath('Notes/A.md');
+    await service.tombstone(id);
+    const ids = await service.findOrCreateForPaths(['Notes/A.md']);
+    assert.equal(ids.get('Notes/A.md'), id);
+    assert.equal((await service.resolve(id)).tombstoned, false);
+  });
+
+  it('covers more paths than one lookup batch', async () => {
+    const paths = Array.from({ length: 1203 }, (_, i) => `Notes/${i}.md`);
+    await service.findOrCreateForPaths(paths.slice(0, 600));
+    const ids = await service.findOrCreateForPaths(paths);
+    assert.equal(ids.size, paths.length);
+    assert.equal(await repo.count(), paths.length);
+  });
+});
+
 describe('DocHandlesService.forPath', () => {
   beforeEach(setup);
   afterEach(teardown);

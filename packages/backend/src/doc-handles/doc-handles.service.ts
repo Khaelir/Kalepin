@@ -1,12 +1,14 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, IsNull, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { DocHandle } from '../entities/doc-handle.entity';
 
 /** Base32 alphabet RFC 4648 (`A-Z2-7`). 5 bits per char × 16 chars = 80 bits. */
 const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 const HANDLE_LEN = 16;
+/** Paths per `IN (...)` query, well under SQLite's bound-parameter limit. */
+const LOOKUP_BATCH = 500;
 
 /** Returns a fresh 16-char base32 id. Caller is responsible for collision retry. */
 export function generateHandleId(): string {
@@ -52,6 +54,24 @@ export class DocHandlesService {
       return existing.id;
     }
     return this.mintNew(path);
+  }
+
+  /** Batch findOrCreateForPath, returning a path → id map covering every
+   * input. Paths with an active row are read in bulk; the rest (no row yet, or
+   * a tombstoned one) go through findOrCreateForPath one by one. */
+  async findOrCreateForPaths(paths: string[]): Promise<Map<string, string>> {
+    const unique = [...new Set(paths)];
+    const ids = new Map<string, string>();
+    for (let i = 0; i < unique.length; i += LOOKUP_BATCH) {
+      const rows = await this.repo.find({
+        where: { path: In(unique.slice(i, i + LOOKUP_BATCH)), tombstoneAt: IsNull() },
+      });
+      for (const row of rows) ids.set(row.path, row.id);
+    }
+    for (const path of unique) {
+      if (!ids.has(path)) ids.set(path, await this.findOrCreateForPath(path));
+    }
+    return ids;
   }
 
   /** Look up an id for a path without minting. Returns null when no row exists. */
