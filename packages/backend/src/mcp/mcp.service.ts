@@ -601,6 +601,10 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           return { content: [{ type: 'text' as const, text: `No notes found matching "${noteId ?? notePath}".` }] };
         }
         const resolvedPath = resolved.length === 1 ? resolved[0].path : notePath!;
+        // Before reading the body: the "referenced in note" check below would
+        // otherwise be a substring oracle on a locked note.
+        const pinSentinel = await this.pinReadSentinel(resolvedPath, user);
+        if (pinSentinel) return pinSentinel;
         if (this.encryptionPredicates.isE2EEncrypted(resolvedPath)) {
           return {
             content: [
@@ -828,6 +832,9 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         const resolvedPath = resolved.length === 1 ? resolved[0].path : path!;
         // Gate before fetching: existence is not observable for foreign personal paths.
         await this.visibility.assertReadableBy(resolvedPath, email);
+        // Threads quote the note body, so they sit behind the PIN like a read.
+        const pinSentinel = await this.pinReadSentinel(resolvedPath, user);
+        if (pinSentinel) return pinSentinel;
         if (this.encryptionPredicates.isE2EEncrypted(resolvedPath)) {
           return {
             content: [
@@ -878,6 +885,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         }
         const resolvedPath = resolved.length === 1 ? resolved[0].path : path!;
         await this.visibility.assertCommentableBy(resolvedPath, email);
+        await this.assertPinUnlockedForWrite(resolvedPath, user);
         if (threadId) {
           await this.commentsService.replyToThread(resolvedPath, blockId || 'default', threadId, user.email, content);
           return { content: [{ type: 'text' as const, text: `Reply added to thread ${threadId} in ${resolvedPath}` }] };
@@ -1160,6 +1168,10 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
 
         const noteContents: string[] = [];
         for (const notePath of notePaths) {
+          if (await this.pinReadSentinel(notePath, user)) {
+            noteContents.push(`## ${notePath}\n\n(PIN-protected, not included)`);
+            continue;
+          }
           try {
             const content = await this.filesService.readFile(notePath, email);
             noteContents.push(`## ${notePath}\n\n${content}`);
@@ -1216,6 +1228,15 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         }
 
         const match = resolved[0];
+        const pinSentinel = await this.pinReadSentinel(match.path, user);
+        if (pinSentinel) {
+          return {
+            messages: [{
+              role: 'user' as const,
+              content: { type: 'text' as const, text: pinSentinel.content[0].text },
+            }],
+          };
+        }
         const content = await this.filesService.readFile(match.path, email);
         return {
           messages: [{
@@ -1298,8 +1319,11 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       if (matches.length > 0) break;
     }
 
+    // Snippets of PIN-locked notes stay blank: these listings are returned
+    // before any caller gets to apply the PIN gate.
     if (matches.length > 0) {
       return Promise.all(matches.map(async (p) => {
+        if (await this.pinService.hasPin(p)) return { path: p, snippet: '' };
         try {
           const content = await this.filesService.readFile(p, userEmail);
           return { path: p, snippet: content.slice(0, 100).replace(/\n/g, ' ') + '...' };
@@ -1312,10 +1336,12 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     // 3. Fall back to search
     const results = await this.searchService.search(input, 'mcp', userEmail);
     if (results.length > 0) {
-      return results.slice(0, 5).map((r) => ({
+      return Promise.all(results.slice(0, 5).map(async (r) => ({
         path: r.path,
-        snippet: (r.snippet || '').replace(/<\/?mark>/g, '').slice(0, 100) + '...',
-      }));
+        snippet: (await this.pinService.hasPin(r.path))
+          ? ''
+          : (r.snippet || '').replace(/<\/?mark>/g, '').slice(0, 100) + '...',
+      })));
     }
 
     return [];
