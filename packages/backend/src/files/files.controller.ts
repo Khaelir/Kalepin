@@ -136,12 +136,14 @@ export class FilesController {
     @Body() body: { path: string; content?: string },
     @Req() req: Request & { user: JwtPayload },
   ) {
-    await this.pinService.assertUnlockedForRequest(req, body.path, req.user.email);
-    await this.filesService.createFile(body.path, body.content || '', req.user.sub, undefined, req.user.email);
-    void this.accessLog.record(body.path, req.user.email, 'edit', extractClientIp(req));
-    // Match server-side `.md` enforcement so the handle path matches what
-    // FilesService.createFile actually wrote.
+    if (typeof body?.path !== 'string') throw new BadRequestException('path is required');
+    // Match server-side `.md` enforcement up front, so the PIN gate, the access
+    // log and the handle all see the path FilesService.createFile writes.
+    // Checking the raw path would let `x` overwrite a PIN-locked `x.md`.
     const writtenPath = body.path.endsWith('.md') ? body.path : `${body.path}.md`;
+    await this.pinService.assertUnlockedForRequest(req, writtenPath, req.user.email);
+    await this.filesService.createFile(writtenPath, body.content || '', req.user.sub, undefined, req.user.email);
+    void this.accessLog.record(writtenPath, req.user.email, 'edit', extractClientIp(req));
     const handleId = await this.docHandles.findOrCreateForPath(writtenPath);
     return { path: writtenPath, handle: { id: handleId, path: writtenPath } };
   }

@@ -105,6 +105,11 @@ describe('FilesController history endpoints — access control', () => {
     assert.deepEqual(historyCalls, []);
   });
 
+  it('gates create on the .md path it writes, not the raw one', async () => {
+    await assert.rejects(controller.createFile({ path: 'Notes/locked', content: 'x' }, req(ALICE)), PinLockedException);
+    await assert.rejects(controller.createFile({ path: LOCKED_NOTE, content: 'x' }, req(ALICE)), PinLockedException);
+  });
+
   it('serves the owner', async () => {
     assert.deepEqual(await controller.getHistory(ALICE_NOTE, req(ALICE)), []);
     assert.deepEqual(await controller.getVersion(ALICE_NOTE, '3', req(ALICE)), { content: 'old', partial: false });
