@@ -125,7 +125,7 @@ export class DocHandlesService {
   async updatePathPrefix(oldPrefix: string, newPrefix: string): Promise<void> {
     const items = await this.repo
       .createQueryBuilder('h')
-      .where('h.path LIKE :prefix', { prefix: `${oldPrefix}/%` })
+      .where('substr(h.path, 1, length(:prefix)) = :prefix', { prefix: `${oldPrefix}/` })
       .getMany();
     for (const item of items) {
       await this.repathRow(item.id, newPrefix + item.path.slice(oldPrefix.length));

@@ -114,7 +114,7 @@ export class RenameTrackingService implements OnModuleInit {
 
     const starredItems = await this.starRepo
       .createQueryBuilder('s')
-      .where('s.path LIKE :prefix', { prefix: `${folderOldPrefix}%` })
+      .where('substr(s.path, 1, length(:prefix)) = :prefix', { prefix: folderOldPrefix })
       .getMany();
 
     for (const item of starredItems) {
@@ -125,7 +125,7 @@ export class RenameTrackingService implements OnModuleInit {
     // Update note_changes where path starts with the old prefix + '/'
     const changes = await this.changeRepo
       .createQueryBuilder('c')
-      .where('c.path LIKE :prefix', { prefix: `${folderOldPrefix}%` })
+      .where('substr(c.path, 1, length(:prefix)) = :prefix', { prefix: folderOldPrefix })
       .getMany();
 
     for (const change of changes) {

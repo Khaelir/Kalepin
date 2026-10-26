@@ -46,7 +46,7 @@ export class StarsService {
     // Folder rename — update all paths that start with the old prefix
     const items = await this.starRepo
       .createQueryBuilder('s')
-      .where('s.path LIKE :prefix', { prefix: `${oldPrefix}%` })
+      .where('substr(s.path, 1, length(:prefix)) = :prefix', { prefix: oldPrefix })
       .getMany();
 
     for (const item of items) {

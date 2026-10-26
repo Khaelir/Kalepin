@@ -240,7 +240,7 @@ export class ShareLinksService {
   async updatePathPrefix(oldPrefix: string, newPrefix: string): Promise<void> {
     const items = await this.repo
       .createQueryBuilder('s')
-      .where('s.path LIKE :prefix', { prefix: `${oldPrefix}/%` })
+      .where('substr(s.path, 1, length(:prefix)) = :prefix', { prefix: `${oldPrefix}/` })
       .getMany();
 
     for (const item of items) {

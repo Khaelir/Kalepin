@@ -127,9 +127,11 @@ export class GrantsService {
       .where('g.path = :src', { src })
       .andWhere('g.revokedAt IS NULL')
       .getMany();
+    // Exact, case-sensitive prefix test: a LIKE pattern would let `_` / `%`
+    // in a folder name (or a different case) match other users' `_users/` rows.
     const subtree = await this.repo
       .createQueryBuilder('g')
-      .where('g.path LIKE :prefix', { prefix: src + '/%' })
+      .where('substr(g.path, 1, length(:prefix)) = :prefix', { prefix: src + '/' })
       .andWhere('g.revokedAt IS NULL')
       .getMany();
     for (const row of exact) {
@@ -146,7 +148,7 @@ export class GrantsService {
   async cascadeDelete(path: string, now: number = Date.now()): Promise<number> {
     const subtree = await this.repo
       .createQueryBuilder('g')
-      .where('(g.path = :path OR g.path LIKE :prefix)', { path, prefix: path + '/%' })
+      .where('(g.path = :path OR substr(g.path, 1, length(:prefix)) = :prefix)', { path, prefix: path + '/' })
       .andWhere('g.revokedAt IS NULL')
       .getMany();
     for (const row of subtree) {

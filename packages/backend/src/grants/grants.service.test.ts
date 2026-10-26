@@ -292,3 +292,26 @@ describe('GrantsService — cascadeDelete', () => {
     assert.equal(fresh!.revokedAt, t1);
   });
 });
+
+describe('GrantsService — prefix cascades treat folder names literally', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  const VICTIM = '_users/alice@example.com/hr/review.md';
+
+  for (const folder of ['__sers', '_Users', '%']) {
+    it(`moving or deleting "${folder}" leaves _users/ grants alone`, async () => {
+      const g = await service.mint({ grantorEmail: ALICE, granteeEmail: BOB, path: VICTIM, permission: 'read' });
+      await service.cascadeRename(folder, 'M');
+      assert.equal((await service.findById(g.id))!.path, VICTIM);
+      assert.equal(await service.cascadeDelete(folder), 0);
+      assert.equal((await service.findById(g.id))!.revokedAt, null);
+    });
+  }
+
+  it('still rewrites real descendants on rename', async () => {
+    const g = await service.mint({ grantorEmail: ALICE, granteeEmail: BOB, path: 'folder/sub/a.md', permission: 'read' });
+    await service.cascadeRename('folder', 'renamed');
+    assert.equal((await service.findById(g.id))!.path, 'renamed/sub/a.md');
+  });
+});
