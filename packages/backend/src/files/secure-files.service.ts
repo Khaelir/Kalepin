@@ -14,7 +14,7 @@ import { GrantsService } from '../grants/grants.service';
 import { PinService } from '../pin';
 import { FilesService } from './files.service';
 import { canonicalizeEmail } from '../auth/email';
-import { resolveJwtSecret } from '../auth/jwt-secret';
+import { deriveTokenSecret } from '../auth/jwt-secret';
 import { personalRootFor, isUnderPersonalRoot, isCanonicalPath } from '../auth/visibility';
 import {
   hasEnvelopeMagic,
@@ -60,7 +60,8 @@ export class SecureFilesService {
     private readonly grants: GrantsService,
     private readonly pinService: PinService,
   ) {
-    this.jwtSecret = resolveJwtSecret();
+    // Own key, so a handoff token can't be presented as a session JWT.
+    this.jwtSecret = deriveTokenSecret('cek-handoff');
   }
 
   async issueHandoff(src: string, userEmail: string): Promise<{ src: string; plaintext: string; handoffToken: string; expiresIn: number }> {

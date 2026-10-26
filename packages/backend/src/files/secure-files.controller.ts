@@ -21,9 +21,10 @@ export class SecureFilesController {
    * One-shot read of a non-`_secure/` file the owner is preparing to move into
    * `_secure/`. Returns plaintext and a short-lived signed token; the token is
    * required by `POST /api/files/move-to-secure` and may only be redeemed once.
+   * Needs `notes:edit`, like the move it prepares.
    */
   @Get('secure/cek-handoff')
-  @RequiredScope('notes:read')
+  @RequiredScope('notes:edit')
   async cekHandoff(
     @Query('path') filePath: string,
     @Req() req: { user: JwtPayload },

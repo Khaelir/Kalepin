@@ -178,8 +178,15 @@ export class AuthService implements OnModuleInit {
   verifyToken(token: string): JwtPayload {
     let decoded: JwtPayload;
     try {
-      decoded = jwt.verify(token, this.jwtSecret) as unknown as JwtPayload;
+      decoded = jwt.verify(token, this.jwtSecret, { algorithms: ['HS256'] }) as unknown as JwtPayload;
     } catch {
+      throw new UnauthorizedException('Invalid token');
+    }
+    // Session JWTs carry only sub/email. A token with a purpose claim (CEK
+    // handoff, PIN unlock) must never be accepted as a login, even if it was
+    // signed with the session secret by an older build.
+    const claims = decoded as unknown as Record<string, unknown>;
+    if (['type', 'kind', 'path', 'src'].some((k) => k in claims)) {
       throw new UnauthorizedException('Invalid token');
     }
     // Fail closed if the JWT email is not canonical — never silently coerce, since

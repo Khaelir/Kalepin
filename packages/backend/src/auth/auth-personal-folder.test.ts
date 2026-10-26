@@ -113,6 +113,18 @@ describe('AuthService canonicalization', () => {
     assert.equal(payload.sub, 1);
   });
 
+  it('verifyToken rejects purpose tokens signed with the session secret', () => {
+    const service = makeAuthService();
+    const handoff = jwt.sign({ type: 'cek-handoff', src: '_users/alice@example.com/a.md', email: 'alice@example.com' }, JWT_SECRET);
+    const unlock = jwt.sign({ sub: 1, email: 'alice@example.com', path: 'a.md', kind: 'owner' }, JWT_SECRET);
+    for (const tok of [handoff, unlock]) {
+      assert.throws(
+        () => service.verifyToken(tok),
+        (err: any) => err instanceof UnauthorizedException,
+      );
+    }
+  });
+
   it('verifyToken rejects entirely-invalid JWT', () => {
     const service = makeAuthService();
     assert.throws(

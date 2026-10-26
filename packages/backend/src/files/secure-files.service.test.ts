@@ -2,7 +2,9 @@ import 'reflect-metadata';
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import * as assert from 'node:assert/strict';
 import * as crypto from 'crypto';
+import * as jwt from 'jsonwebtoken';
 import { DataSource } from 'typeorm';
+import { resolveJwtSecret } from '../auth/jwt-secret';
 import { FileEntry, FileChangeEvent } from '@kalepin/shared';
 import { StorageAdapter } from '../storage/storage-adapter.interface';
 import { EncryptingStorageAdapter } from '../storage/encrypting-fs.adapter';
@@ -150,6 +152,11 @@ describe('SecureFilesService — issueHandoff', () => {
     assert.equal(typeof out.handoffToken, 'string');
     assert.ok(out.handoffToken.split('.').length === 3, 'handoff token is a JWT');
     assert.ok(out.expiresIn > 0);
+  });
+
+  it('signs the token with a key that does not verify as a session JWT', async () => {
+    const out = await svc.issueHandoff(SRC, ALICE);
+    assert.throws(() => jwt.verify(out.handoffToken, resolveJwtSecret()), /invalid signature/);
   });
 
   it('rejects a path the user does not own', async () => {

@@ -1,3 +1,5 @@
+import { createHmac } from 'crypto';
+
 const DEFAULT_DEV_SECRET = 'dev-secret-change-me';
 const MIN_PROD_LENGTH = 32;
 
@@ -27,4 +29,13 @@ export function resolveJwtSecret(): string {
   }
 
   return value;
+}
+
+/**
+ * Signing key for a non-session JWT, derived from JWT_SECRET per purpose. A
+ * token minted with it can never verify as a session JWT (and vice versa), so
+ * a narrow-purpose token cannot be replayed as a full login.
+ */
+export function deriveTokenSecret(purpose: string): string {
+  return createHmac('sha256', resolveJwtSecret()).update(`kalepin-token:${purpose}`).digest('hex');
 }
