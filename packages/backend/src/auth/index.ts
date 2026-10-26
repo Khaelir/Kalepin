@@ -23,6 +23,7 @@ export {
 export type { Visibility } from './visibility';
 export { GrantAwareVisibility } from './grant-aware-visibility.service';
 export { OAuthModule } from './oauth/oauth.module';
+export { SsoModule } from './sso/sso.module';
 export { OAuthService } from './oauth/oauth.service';
 export { GrantLock } from './oauth/grant-lock';
 export { OAuthEventBus } from './oauth/oauth.events';

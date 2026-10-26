@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.82 — 2026-10-26
+
+### Added
+
+- **Sign in with Microsoft (optional).** Teams on Microsoft 365 can sign in with their Entra ID work account, next to the magic link, which stays available to everyone. Single tenant only: Kalepin is pinned to one tenant and rejects tokens from any other. Accounts are matched by email, so existing magic-link users land in the same account, with the same notes and personal folder. Microsoft's tokens are used once and discarded. Off until configured; setup guide in [docs/microsoft-sso.md](docs/microsoft-sso.md).
+
+### Configuration
+
+- New optional `SSO_MICROSOFT_TENANT_ID`, `SSO_MICROSOFT_CLIENT_ID`, `SSO_MICROSOFT_CLIENT_SECRET_FILE` / `SSO_MICROSOFT_CLIENT_SECRET` and `SSO_MICROSOFT_AUTHORITY_HOST`. A partial or invalid configuration logs a warning and leaves the button off; it never stops Kalepin from starting.
+- `DOMAIN_ALLOWLIST` now applies to every login method and matches domains case-insensitively. An entry like `Example.com`, which used to match nobody, now matches `@example.com` addresses.
+
+### Fixed
+
+- **Magic links sent from the OAuth consent screen return to it.** The session token was appended after the `#/oauth/consent?request_id=…` fragment, so the SPA never saw it and the consent request was lost. It now goes before the fragment.
+
 ## 0.5.57 — 2026-05-01
 
 ### Added

@@ -13,6 +13,7 @@ Notes are stored as plain `.md` files on disk — compatible with Obsidian and a
 - **Comments** — Thread-based comments attached to content blocks, stored in sidecar files to keep your markdown clean.
 - **MCP server** — Give Claude (or any MCP client) full access to your notes: search, read, create, edit, comment.
 - **Magic link auth** — Passwordless email authentication with domain allowlists.
+- **Microsoft sign-in (optional)** — "Sign in with Microsoft" for one Entra ID tenant, next to the magic link. See [docs/microsoft-sso.md](docs/microsoft-sso.md).
 - **At-rest encryption** — Per-zone envelope encryption (AES-256-GCM + AES-KW). Personal folders encrypted by default; shared vault is opt-in to keep Obsidian-on-disk working. See [Encryption](#encryption).
 - **Self-hosted** — Docker-ready with SQLite. No external database needed.
 
@@ -74,11 +75,16 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `OAUTH_CORS_ALLOW_LIST` | — | Optional comma-separated extra origins allowed to call `/mcp`, `/oauth/*`, and `/.well-known/oauth-*`. `https://claude.ai` is always allowed. |
 | `OAUTH_PREREGISTERED_CLIENT_IDS` | — | Optional comma-separated `client_id`s to insert into `oauth_clients` at boot. Use only when claude.ai already has a connector registered with a hand-picked `client_id` (e.g. installed before this Kalepin instance had OAuth, or set up by an Owner who can't delete/re-add). Pre-registered rows are public clients (PKCE only) locked to claude.ai's MCP callback. |
 | `PORT` | `3000` | Server port |
-| `DOMAIN_ALLOWLIST` | `*` | Comma-separated email domains allowed to sign in, or `*` for any |
+| `DOMAIN_ALLOWLIST` | `*` | Comma-separated email domains allowed to sign in (by any method), or `*` for any. Matched case-insensitively. |
 | `SMTP_HOST` | `in-v3.mailjet.com` | SMTP server for magic link emails |
 | `SMTP_PORT` | `587` | SMTP port |
 | `SMTP_USER` / `SMTP_PASS` | — | SMTP credentials |
 | `SMTP_FROM` | `noreply@kalepin.app` | Sender email address |
+| `SSO_MICROSOFT_TENANT_ID` | — | Optional. Your Entra Directory (tenant) ID, a GUID. With the client ID and secret, enables **Sign in with Microsoft**. See [docs/microsoft-sso.md](docs/microsoft-sso.md). |
+| `SSO_MICROSOFT_CLIENT_ID` | — | Entra Application (client) ID, a GUID. |
+| `SSO_MICROSOFT_CLIENT_SECRET_FILE` | — | Path to a file holding the Entra client secret (recommended). |
+| `SSO_MICROSOFT_CLIENT_SECRET` | — | Alternative to `_FILE`: the secret value itself. The file wins if both are set. |
+| `SSO_MICROSOFT_AUTHORITY_HOST` | `https://login.microsoftonline.com` | Change only for a national cloud (e.g. `https://login.microsoftonline.us`). |
 | `KALEPIN_KEK_FILE` | — | Path to a 32-byte raw KEK file (mode `0400`/`0600`). Enables at-rest envelope encryption when set. See [Encryption](#encryption). |
 | `KALEPIN_KEK_AUTO_GENERATE` | — | Dev-only convenience: when set to `1` and `KALEPIN_KEK_FILE` does not exist, generate a fresh KEK at boot. **Never enable in production.** |
 | `KALEPIN_KEK` | — | Dev/test fallback: hex-encoded 32-byte KEK. Refused when `NODE_ENV=production` unless `KALEPIN_KEK_FILE` is also set. |
@@ -353,7 +359,7 @@ packages/
 - **Frontend:** React, TipTap 3 (ProseMirror), Vite
 - **Search:** SQLite FTS5 + local ONNX embeddings (multilingual-e5-base)
 - **MCP:** @modelcontextprotocol/sdk
-- **Auth:** JWT + magic links via SMTP
+- **Auth:** JWT + magic links via SMTP; Microsoft sign-in (optional, OpenID Connect via `openid-client`)
 - **Deploy:** Docker (node:20-slim), multi-stage build
 
 ## License

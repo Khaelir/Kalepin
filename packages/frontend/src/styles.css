@@ -3560,6 +3560,41 @@ html[data-editor-font='serif'] .editor-content .tiptap {
 .login-sent { color: var(--kalepin-text-secondary); line-height: 1.6; }
 .login-error { color: var(--kalepin-primary); margin-top: 12px; font-size: 13px; }
 
+/* SSO provider buttons, above the magic-link form */
+.login-card .login-sso-error { color: var(--kalepin-primary); margin: 0 0 16px; font-size: 13px; }
+
+.login-providers { display: flex; flex-direction: column; gap: 12px; }
+
+.login-card .login-provider-button {
+  padding: 10px;
+  background: var(--kalepin-bg-elevated);
+  border: 1px solid var(--kalepin-border-strong);
+  border-radius: var(--kalepin-radius);
+  color: var(--kalepin-text-default);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.login-card .login-provider-button:hover { background: var(--kalepin-bg-hover); border-color: var(--kalepin-primary); }
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 20px;
+  color: var(--kalepin-text-secondary);
+  font-size: 12px;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--kalepin-border-color);
+}
+
 /* OAuth consent page */
 .oauth-consent-page {
   min-height: 100vh;

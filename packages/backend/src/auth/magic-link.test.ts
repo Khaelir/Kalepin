@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { AuthService } from './auth.service';
 import { safeReturnPath } from './return-to';
@@ -60,6 +60,50 @@ describe('AuthService.verifyMagicLink', () => {
     const repo = ds.getRepository(MagicLinkToken);
     assert.equal((await repo.findOneByOrFail({ email: 'alice@example.com' })).returnTo, '/');
     assert.equal((await repo.findOneByOrFail({ email: 'bob@example.com' })).returnTo, '/doc/abc?x=1#h');
+  });
+});
+
+describe('AuthService domain allowlist', () => {
+  function serviceWithAllowlist(allowlist: string): AuthService {
+    process.env.DOMAIN_ALLOWLIST = allowlist;
+    return new AuthService(ds.getRepository(User), ds.getRepository(MagicLinkToken), {} as any);
+  }
+
+  it('matches a mixed-case, padded entry', async () => {
+    await serviceWithAllowlist(' Company.com ').requestMagicLink('alice@company.com');
+    assert.ok(await ds.getRepository(MagicLinkToken).findOneBy({ email: 'alice@company.com' }));
+  });
+
+  it('rejects other domains', async () => {
+    await assert.rejects(
+      () => serviceWithAllowlist('company.com').requestMagicLink('eve@other.com'),
+      (err: unknown) => err instanceof BadRequestException,
+    );
+  });
+});
+
+describe('AuthService SSO helpers', () => {
+  it('finds users by any of several emails', async () => {
+    const alice = await service.createUser('alice@example.com');
+    await service.createUser('bob@example.com');
+    assert.deepEqual(await service.findUsersByEmails([]), []);
+    const found = await service.findUsersByEmails(['carol@example.com', 'alice@example.com']);
+    assert.deepEqual(found.map((u) => u.id), [alice.id]);
+  });
+
+  it('creates a user with the canonical email and returns the existing row on a repeat', async () => {
+    const first = await service.createUser(' Alice@Example.com ');
+    assert.equal(first.email, 'alice@example.com');
+    const again = await service.createUser('alice@example.com');
+    assert.equal(again.id, first.id);
+    assert.equal(await ds.getRepository(User).count(), 1);
+  });
+
+  it('issues the same session JWT as the magic link', async () => {
+    const user = await service.createUser('alice@example.com');
+    const payload = service.verifyToken(service.issueSession(user));
+    assert.equal(payload.sub, user.id);
+    assert.equal(payload.email, 'alice@example.com');
   });
 });
 

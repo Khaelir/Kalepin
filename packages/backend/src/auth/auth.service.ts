@@ -1,6 +1,6 @@
 import { Injectable, Logger, UnauthorizedException, BadRequestException, OnModuleInit, Optional, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import * as jwt from 'jsonwebtoken';
 import * as nodemailer from 'nodemailer';
 import { randomUUID, createHash, randomBytes } from 'crypto';
@@ -11,6 +11,7 @@ import { OAuthEventBus } from './oauth/oauth.events';
 import { canonicalizeEmail } from './email';
 import { resolveJwtSecret } from './jwt-secret';
 import { safeReturnPath } from './return-to';
+import { parseDomainAllowlist, isEmailDomainAllowed } from './domain-allowlist';
 import { STORAGE_ADAPTER } from '../storage/storage-adapter.interface';
 import { RoutingStorageAdapter } from '../storage/routing-fs.adapter';
 
@@ -46,8 +47,7 @@ export class AuthService implements OnModuleInit {
     this.jwtExpiry = process.env.JWT_EXPIRY || '7d';
     this.appUrl = process.env.APP_URL || 'http://localhost:3000';
 
-    const allowlist = process.env.DOMAIN_ALLOWLIST || '*';
-    this.domainAllowlist = allowlist === '*' ? ['*'] : allowlist.split(',').map((d) => d.trim());
+    this.domainAllowlist = parseDomainAllowlist(process.env.DOMAIN_ALLOWLIST);
 
     this.transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST || 'in-v3.mailjet.com',
@@ -67,10 +67,13 @@ export class AuthService implements OnModuleInit {
     }
   }
 
+  /** The parsed `DOMAIN_ALLOWLIST`, shared by every login method. */
+  getDomainAllowlist(): readonly string[] {
+    return this.domainAllowlist;
+  }
+
   private isEmailAllowed(email: string): boolean {
-    if (this.domainAllowlist.includes('*')) return true;
-    const domain = email.split('@')[1];
-    return this.domainAllowlist.includes(domain);
+    return isEmailDomainAllowed(email, this.domainAllowlist);
   }
 
   async requestMagicLink(email: string, returnTo?: string): Promise<void> {
@@ -129,11 +132,33 @@ export class AuthService implements OnModuleInit {
 
     await this.ensurePersonalFolderSafe(canonical);
 
-    return { sessionToken: this.signSessionToken(user), returnTo: record.returnTo };
+    return { sessionToken: this.issueSession(user), returnTo: record.returnTo };
+  }
+
+  /** Users whose canonical email is one of `emails`. */
+  async findUsersByEmails(emails: string[]): Promise<User[]> {
+    if (emails.length === 0) return [];
+    return this.userRepo.find({ where: { email: In(emails) } });
+  }
+
+  /**
+   * Create a user for `email` (canonicalised). If a concurrent login created
+   * the same address first, the unique index rejects the insert and the
+   * existing row is returned instead.
+   */
+  async createUser(email: string): Promise<User> {
+    const canonical = canonicalizeEmail(email);
+    try {
+      return await this.userRepo.save({ email: canonical });
+    } catch (err) {
+      const existing = await this.userRepo.findOne({ where: { email: canonical } });
+      if (existing) return existing;
+      throw err;
+    }
   }
 
   /** Idempotent: creates the per-user personal folder if a routing storage adapter is wired. */
-  private async ensurePersonalFolderSafe(email: string): Promise<void> {
+  async ensurePersonalFolderSafe(email: string): Promise<void> {
     const adapter = this.storage as RoutingStorageAdapter | undefined;
     if (adapter && typeof adapter.ensurePersonalFolder === 'function') {
       try {
@@ -144,7 +169,8 @@ export class AuthService implements OnModuleInit {
     }
   }
 
-  private signSessionToken(user: User): string {
+  /** Sign the session JWT handed to the SPA after any successful login. */
+  issueSession(user: Pick<User, 'id' | 'email'>): string {
     const payload: JwtPayload = { sub: user.id, email: user.email };
     return jwt.sign(payload as object, this.jwtSecret, { expiresIn: this.jwtExpiry } as jwt.SignOptions);
   }

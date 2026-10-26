@@ -1,58 +1,7 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { parseDomainAllowlist, isEmailDomainAllowed } from './domain-allowlist';
+import { parseDomainAllowlist, isEmailDomainAllowed } from '../auth/domain-allowlist';
 import { isCrossPersonalMention } from './notification.service';
-
-describe('parseDomainAllowlist', () => {
-  it('returns ["*"] when input is undefined', () => {
-    assert.deepEqual(parseDomainAllowlist(undefined), ['*']);
-  });
-
-  it('returns ["*"] when input is "*"', () => {
-    assert.deepEqual(parseDomainAllowlist('*'), ['*']);
-  });
-
-  it('parses a single domain', () => {
-    assert.deepEqual(parseDomainAllowlist('acme.com'), ['acme.com']);
-  });
-
-  it('parses comma-separated domains and trims whitespace', () => {
-    assert.deepEqual(parseDomainAllowlist('acme.com, partner.org , example.net'), [
-      'acme.com',
-      'partner.org',
-      'example.net',
-    ]);
-  });
-});
-
-describe('isEmailDomainAllowed', () => {
-  it('allows any email when allowlist is wildcard', () => {
-    assert.equal(isEmailDomainAllowed('anyone@anywhere.org', ['*']), true);
-  });
-
-  it('allows email whose domain is in the allowlist', () => {
-    assert.equal(isEmailDomainAllowed('alice@acme.com', ['acme.com']), true);
-  });
-
-  it('blocks email whose domain is not in the allowlist', () => {
-    assert.equal(isEmailDomainAllowed('eve@external.com', ['acme.com']), false);
-  });
-
-  it('works with multiple allowed domains', () => {
-    const allowlist = ['acme.com', 'partner.org'];
-    assert.equal(isEmailDomainAllowed('alice@acme.com', allowlist), true);
-    assert.equal(isEmailDomainAllowed('bob@partner.org', allowlist), true);
-    assert.equal(isEmailDomainAllowed('eve@evil.com', allowlist), false);
-  });
-
-  it('blocks subdomain that is not explicitly listed', () => {
-    assert.equal(isEmailDomainAllowed('user@sub.acme.com', ['acme.com']), false);
-  });
-
-  it('blocks email with no domain match even if prefix matches', () => {
-    assert.equal(isEmailDomainAllowed('acme.com@evil.com', ['acme.com']), false);
-  });
-});
 
 describe('NotificationService domain gating (integration)', () => {
   it('blocks all three notification paths for disallowed domains', () => {

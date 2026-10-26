@@ -21,3 +21,23 @@ export function safeReturnPath(returnTo: unknown): string {
   // Dot segments can collapse into a leading `//` (`/.//evil.example/`).
   return path.startsWith('//') ? '/' : path;
 }
+
+/**
+ * The post-login redirect shared by every login method: the sanitised
+ * `returnTo` with `params` (the session `token`, or an `sso_error`) set in
+ * its query. The params go before the fragment, so hash routes such as
+ * `/#/oauth/consent?request_id=…` keep both the route and the token, which
+ * the SPA reads from `location.search`. A param already present in
+ * `returnTo` is replaced, never duplicated.
+ */
+export function buildPostLoginRedirect(returnTo: unknown, params: Record<string, string>): string {
+  const path = safeReturnPath(returnTo);
+  const hashAt = path.indexOf('#');
+  const beforeHash = hashAt === -1 ? path : path.slice(0, hashAt);
+  const fragment = hashAt === -1 ? '' : path.slice(hashAt);
+  const queryAt = beforeHash.indexOf('?');
+  const pathname = queryAt === -1 ? beforeHash : beforeHash.slice(0, queryAt);
+  const query = new URLSearchParams(queryAt === -1 ? '' : beforeHash.slice(queryAt + 1));
+  for (const [key, value] of Object.entries(params)) query.set(key, value);
+  return `${pathname}?${query.toString()}${fragment}`;
+}

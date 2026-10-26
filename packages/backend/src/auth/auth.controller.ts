@@ -10,7 +10,7 @@ import { SCOPE_PERMISSIONS, PERMISSIONS } from './permissions';
 import type { ApiKeyScope } from './permissions';
 import { isAdmin } from './admin.util';
 import { canonicalizeEmail } from './email';
-import { safeReturnPath } from './return-to';
+import { buildPostLoginRedirect } from './return-to';
 import { SlidingWindowRateLimiter } from './oauth/rate-limit';
 import { User } from '../entities/user.entity';
 
@@ -56,7 +56,7 @@ export class AuthController {
     const { sessionToken, returnTo } = await this.authService.verifyMagicLink(token);
     // Re-checked here as well as on storage: rows written before the check
     // existed may still hold an off-origin target.
-    res.redirect(`${safeReturnPath(returnTo)}?token=${sessionToken}`);
+    res.redirect(buildPostLoginRedirect(returnTo, { token: sessionToken }));
   }
 
   @Post('auth/api-keys')

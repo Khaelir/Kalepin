@@ -1,6 +1,12 @@
 import { defineConfig, devices } from '@playwright/test';
 import path from 'path';
 import os from 'os';
+import {
+  MOCK_OIDC_BASE,
+  MOCK_OIDC_CLIENT_ID,
+  MOCK_OIDC_CLIENT_SECRET,
+  MOCK_OIDC_TENANT,
+} from './mock-oidc-issuer';
 
 // Use fixed paths so config + test workers + the backend webServer share the
 // same vault, personal-root and SQLite database. The wipe runs as part of the
@@ -19,6 +25,11 @@ export const VAULT_PATH = vaultPath;
 export const PERSONAL_PATH = personalPath;
 export const DB_PATH = dbPath;
 export const KEK_PATH = kekPath;
+// APP_URL is the frontend origin: the SSO callback goes through the Vite proxy
+// to the backend, and its final `/?token=` redirect must land on the origin
+// that holds the SPA's localStorage.
+export const APP_URL = `http://localhost:${FRONTEND_PORT}`;
+export const SSO_CALLBACK_URL = `${APP_URL}/api/auth/sso/microsoft/callback`;
 
 // Tests in this glob run on every browser project (chromium / firefox / webkit).
 // Everything else stays on chromium-only to keep CI fast — the multi-browser
@@ -33,6 +44,8 @@ const wipeDataCmd = `rm -rf ${JSON.stringify(dataRoot)} && mkdir -p ${JSON.strin
 
 export default defineConfig({
   testDir: './tests',
+  // Starts the mock Microsoft identity provider (mock-oidc-issuer.ts).
+  globalSetup: './global-setup.ts',
   timeout: 120_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
@@ -88,6 +101,12 @@ export default defineConfig({
         // test sessions get a fresh KEK.
         KALEPIN_KEK_FILE: kekPath,
         KALEPIN_KEK_AUTO_GENERATE: '1',
+        APP_URL,
+        // Microsoft sign-in against the mock issuer started by global-setup.ts.
+        SSO_MICROSOFT_TENANT_ID: MOCK_OIDC_TENANT,
+        SSO_MICROSOFT_CLIENT_ID: MOCK_OIDC_CLIENT_ID,
+        SSO_MICROSOFT_CLIENT_SECRET: MOCK_OIDC_CLIENT_SECRET,
+        SSO_MICROSOFT_AUTHORITY_HOST: MOCK_OIDC_BASE,
       },
     },
     {

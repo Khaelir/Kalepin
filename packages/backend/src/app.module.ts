@@ -4,10 +4,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
-import { User, Session, MagicLinkToken, OTOperationHistory, ApiKey, NoteChange, StarredItem, NoteLink, NoteSnapshot, McpUsageLog, MentionNotification, DailyStats, FailedSearch, ShortLink, DocHandle, OAuthClient, OAuthAuthorizationRequest, OAuthAuthorizationCode, OAuthGrant, OAuthAccessToken, OAuthRefreshToken, EncryptionZone, NoteMeta, DocumentGrant, NoteAccessLog } from './entities';
+import { User, Session, MagicLinkToken, OTOperationHistory, ApiKey, NoteChange, StarredItem, NoteLink, NoteSnapshot, McpUsageLog, MentionNotification, DailyStats, FailedSearch, ShortLink, DocHandle, OAuthClient, OAuthAuthorizationRequest, OAuthAuthorizationCode, OAuthGrant, OAuthAccessToken, OAuthRefreshToken, EncryptionZone, NoteMeta, DocumentGrant, NoteAccessLog, SsoLoginRequest, UserIdentity } from './entities';
 import { StorageModule } from './storage';
 import { EncryptionModule } from './encryption/encryption.module';
-import { AuthModule, OAuthModule } from './auth';
+import { AuthModule, OAuthModule, SsoModule } from './auth';
 import { FilesModule } from './files';
 import { OTModule } from './ot';
 import { CommentsModule } from './comments';
@@ -38,7 +38,7 @@ import { TestDebugModule } from './__test/test-debug.module';
     TypeOrmModule.forRoot({
       type: 'better-sqlite3',
       database: process.env.DB_PATH || './data/kalepin.sqlite',
-      entities: [User, Session, MagicLinkToken, OTOperationHistory, ApiKey, NoteChange, StarredItem, NoteLink, NoteSnapshot, McpUsageLog, MentionNotification, DailyStats, FailedSearch, ShortLink, DocHandle, OAuthClient, OAuthAuthorizationRequest, OAuthAuthorizationCode, OAuthGrant, OAuthAccessToken, OAuthRefreshToken, EncryptionZone, NoteMeta, DocumentGrant, NoteAccessLog],
+      entities: [User, Session, MagicLinkToken, OTOperationHistory, ApiKey, NoteChange, StarredItem, NoteLink, NoteSnapshot, McpUsageLog, MentionNotification, DailyStats, FailedSearch, ShortLink, DocHandle, OAuthClient, OAuthAuthorizationRequest, OAuthAuthorizationCode, OAuthGrant, OAuthAccessToken, OAuthRefreshToken, EncryptionZone, NoteMeta, DocumentGrant, NoteAccessLog, SsoLoginRequest, UserIdentity],
       synchronize: true,
     }),
     // CORS for /drawio/ is handled by the Express middleware in main.ts
@@ -51,6 +51,7 @@ import { TestDebugModule } from './__test/test-debug.module';
     StorageModule,
     AuthModule,
     OAuthModule,
+    SsoModule,
     FilesModule,
     OTModule,
     CommentsModule,

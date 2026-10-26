@@ -5,7 +5,7 @@ import * as nodemailer from 'nodemailer';
 import { User } from '../entities/user.entity';
 import { DocHandlesService } from '../doc-handles/doc-handles.service';
 import { PERSONAL_PREFIX } from '../auth/visibility';
-import { parseDomainAllowlist, isEmailDomainAllowed } from './domain-allowlist';
+import { parseDomainAllowlist, isEmailDomainAllowed } from '../auth/domain-allowlist';
 
 export function isCrossPersonalMention(notePath: string, recipientEmail: string): boolean {
   if (!notePath.startsWith(PERSONAL_PREFIX)) return false;

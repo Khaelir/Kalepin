@@ -25,3 +25,5 @@ export { DocumentGrant } from './document-grant.entity';
 export type { GrantPermission } from './document-grant.entity';
 export { NoteAccessLog } from './note-access-log.entity';
 export type { AccessLogAction } from './note-access-log.entity';
+export { SsoLoginRequest } from './sso-login-request.entity';
+export { UserIdentity } from './user-identity.entity';
