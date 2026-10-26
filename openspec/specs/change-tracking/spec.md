@@ -1,11 +1,9 @@
 ## Purpose
 
 Persists a history of note changes so the changes panel and activity views can report recent edits.
-
 ## Requirements
-
 ### Requirement: Note changes are persisted on every save
-The system SHALL record a row in the `note_changes` table each time a note is created, modified, or deleted. The row SHALL contain the file path, action type, a unified diff (for creates and modifications), and a timestamp.
+The system SHALL record a row in the `note_changes` table each time a note is created, modified, or deleted. The row SHALL contain the file path, action type, a unified diff (for creates and modifications), and a timestamp. Deleting a folder SHALL record one `deleted` row per note it contains. Restoring a note from the trash SHALL record a `created` row with its full content. Notes deleted on disk by another program SHALL record a `deleted` row.
 
 #### Scenario: OT flush persists a diff
 - **WHEN** the OT session manager flushes a dirty document to disk
@@ -22,6 +20,19 @@ The system SHALL record a row in the `note_changes` table each time a note is cr
 #### Scenario: Note deletion persists a record
 - **WHEN** a note is deleted (via any path)
 - **THEN** the system inserts a row with `action='deleted'` and `diff=NULL` into `note_changes`
+
+#### Scenario: Folder deletion records each note
+- **WHEN** a folder containing `a.md` and `sub/b.md` is moved to the trash
+- **THEN** the system inserts one `deleted` row for `a.md` and one for `sub/b.md`
+
+#### Scenario: Restore continues the history
+- **WHEN** a note is restored from the trash
+- **THEN** the system inserts a row with `action='created'` and the restored content at the restored path
+
+#### Scenario: External delete is recorded once
+- **WHEN** another program deletes `notes/x.md` from disk and no `add` pairs it into a rename
+- **THEN** the system inserts one `deleted` row for `notes/x.md` with no user
+- **AND** removals Kalepin caused itself do not produce an extra row
 
 ### Requirement: OT diff capture has zero extra disk I/O
 The system SHALL compute diffs on the OT flush path using only in-memory data (`lastFlushedContent` vs `session.content`). The system SHALL NOT perform additional file reads on the OT path for diff computation.
@@ -47,3 +58,4 @@ The system SHALL delete rows from `note_changes` where `created_at` is older tha
 #### Scenario: Hard cap at 90 days
 - **WHEN** a change row is older than 90 days
 - **THEN** it is deleted during pruning regardless of any user's `last_active_at`
+

@@ -1,11 +1,9 @@
 ## Purpose
 
 Detects and removes orphan attachments that are no longer referenced by any note.
-
 ## Requirements
-
 ### Requirement: Orphan detection by scanning documents
-The system SHALL provide an endpoint `POST /api/files/attachments/cleanup` that scans all `.md` files in the vault for image references to `_attachments/`, compares against actual files in `_attachments/`, and identifies unreferenced files as orphans.
+The system SHALL provide an endpoint `POST /api/files/attachments/cleanup` that scans all `.md` files in the vault for image references to `_attachments/`, compares against actual files in `_attachments/`, and identifies unreferenced files as orphans. Notes in a trash folder (`.trash/`) SHALL be scanned like any other note, so a note that can still be restored keeps its attachments.
 
 #### Scenario: Detect orphaned attachment
 - **WHEN** cleanup is triggered and `_attachments/abc123.png` is not referenced by any `.md` file in the vault
@@ -14,6 +12,10 @@ The system SHALL provide an endpoint `POST /api/files/attachments/cleanup` that 
 #### Scenario: Referenced attachment is kept
 - **WHEN** cleanup is triggered and `_attachments/def456.png` is referenced by `notes/doc.md`
 - **THEN** the system does NOT identify `def456.png` as an orphan
+
+#### Scenario: Attachment referenced by a trashed note is kept
+- **WHEN** cleanup is triggered and `_attachments/ghi789.png` is referenced only by `.trash/<id>/doc.md`
+- **THEN** the system does NOT identify `ghi789.png` as an orphan
 
 #### Scenario: No attachments directory exists
 - **WHEN** cleanup is triggered and `_attachments/` does not exist
@@ -51,3 +53,4 @@ The cleanup endpoint SHALL return a summary of actions taken, including the numb
 #### Scenario: Cleanup with nothing to do
 - **WHEN** cleanup finds no orphans and no expired trash entries
 - **THEN** it returns `{ orphansFound: 0, movedToTrash: 0, purgedFromTrash: 0 }`
+
