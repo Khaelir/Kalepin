@@ -12,7 +12,6 @@ import { User } from '../entities/user.entity';
 import { CommentsService } from './comments.service';
 import { CommentsController } from './comments.controller';
 import { SidecarService } from './sidecar.service';
-import { NotificationService } from './notification.service';
 import { MentionTrackingService } from './mention-tracking.service';
 import { DocMentionService } from './doc-mention.service';
 
@@ -28,8 +27,9 @@ import { DocMentionService } from './doc-mention.service';
     StorageModule,
   ],
   controllers: [CommentsController],
-  providers: [CommentsService, SidecarService, NotificationService, MentionTrackingService, DocMentionService],
-  exports: [CommentsService, SidecarService, NotificationService, MentionTrackingService, DocMentionService],
+  // NotificationService is provided by the global NotificationsModule.
+  providers: [CommentsService, SidecarService, MentionTrackingService, DocMentionService],
+  exports: [CommentsService, SidecarService, MentionTrackingService, DocMentionService],
 })
 export class CommentsModule implements OnModuleInit {
   constructor(private readonly mentionTracking: MentionTrackingService) {}

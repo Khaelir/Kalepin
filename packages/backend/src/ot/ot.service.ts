@@ -149,6 +149,34 @@ export class OTService {
     return renamed;
   }
 
+  /**
+   * After `src` (file or folder) moved to `trashPath`: drop every session at
+   * or under `src` so no later flush re-creates the file. `beforeMove` already
+   * flushed them; edits that landed after that flush are written straight to
+   * the trashed copy (no indexing, no change row — the note is in the trash).
+   * Returns the dropped doc ids with their clients.
+   */
+  async discardSessionsUnder(
+    src: string,
+    trashPath: string,
+  ): Promise<Array<{ docId: string; clients: WebSocket[] }>> {
+    const dropped: Array<{ docId: string; clients: WebSocket[] }> = [];
+    for (const docId of this.sessionManager.sessionIdsAtOrUnder(src)) {
+      const result = this.sessionManager.discardSession(docId);
+      if (!result) continue;
+      if (result.unflushed !== null) {
+        const dest = trashPath + docId.slice(src.length);
+        try {
+          await this.storage.write(dest, result.unflushed);
+        } catch (err) {
+          this.logger.error(`Failed to save late edits of trashed "${docId}"`, err);
+        }
+      }
+      dropped.push({ docId, clients: result.clients });
+    }
+    return dropped;
+  }
+
   async handleExternalWrite(docId: string): Promise<WebSocket[] | null> {
     const session = this.sessionManager.getSession(docId);
     if (!session) return null;

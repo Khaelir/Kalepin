@@ -7,6 +7,8 @@ import { OTModule } from '../ot/ot.module';
 import { SearchService } from './search.service';
 import { SearchController } from './search.controller';
 import { EmbeddingService } from './embedding.service';
+import { RelatedNotesService } from './related-notes.service';
+import { RelatedNotesController } from './related-notes.controller';
 
 @Module({
   imports: [
@@ -16,8 +18,8 @@ import { EmbeddingService } from './embedding.service';
     StatsModule,
     forwardRef(() => OTModule),
   ],
-  controllers: [SearchController],
-  providers: [EmbeddingService, SearchService],
-  exports: [SearchService],
+  controllers: [SearchController, RelatedNotesController],
+  providers: [EmbeddingService, SearchService, RelatedNotesService],
+  exports: [SearchService, RelatedNotesService],
 })
 export class SearchModule {}

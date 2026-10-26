@@ -33,12 +33,27 @@ export interface MoveHooks {
   beforeMove?: (src: string, dest: string) => Promise<void>;
   /** Runs once the rename and every path rewrite are done. Errors are logged. */
   afterMove?: (src: string, dest: string) => Promise<void>;
+  /**
+   * Runs once `src` (file or folder) has been moved to `trashPath` by
+   * `relocateForTrash`. `beforeMove` ran first. Errors are logged.
+   */
+  afterTrash?: (src: string, trashPath: string, trashItemId: string) => Promise<void>;
+}
+
+/**
+ * Receives deletes that should go to the trash. Registered by TrashService so
+ * FilesService does not depend on it (same inversion as MoveHooks).
+ */
+export interface TrashHandler {
+  /** Move `path` to its zone's trash; resolves to the trash item id. */
+  trash(path: string, actor: { userId?: number; email?: string }): Promise<string>;
 }
 
 @Injectable()
 export class FilesService extends EventEmitter {
   private readonly logger = new Logger(FilesService.name);
   private readonly moveHooks: MoveHooks[] = [];
+  private trashHandler: TrashHandler | null = null;
 
   constructor(
     @Inject(STORAGE_ADAPTER) private readonly storage: StorageAdapter,
@@ -221,13 +236,27 @@ export class FilesService extends EventEmitter {
     }
   }
 
-  async deleteFile(filePath: string, userId?: number, userEmail?: string): Promise<void> {
+  setTrashHandler(handler: TrashHandler): void {
+    this.trashHandler = handler;
+  }
+
+  /**
+   * Delete a note. Moves it to its zone's trash when a trash handler is
+   * registered; `_secure/` (E2E) paths are always deleted permanently, since
+   * their envelope AAD binds the path and the server can't re-encrypt them.
+   * `trashItemId` is null for a permanent delete.
+   */
+  async deleteFile(filePath: string, userId?: number, userEmail?: string): Promise<{ trashItemId: string | null }> {
     if (userEmail) {
       await this.assertWritable(filePath, userEmail);
       if (isPersonalRootSegment(filePath)) {
         throw new BadRequestException('Personal folder cannot be deleted');
       }
     }
+    if (this.trashHandler && !isE2EPath(filePath)) {
+      return { trashItemId: await this.trashHandler.trash(filePath, { userId, email: userEmail }) };
+    }
+    this.fileWatcher?.markSelfRemoved(filePath);
     await this.storage.delete(filePath);
     if (this.grants) {
       await this.grants.cascadeDelete(filePath);
@@ -259,6 +288,55 @@ export class FilesService extends EventEmitter {
         this.logger.error(`Failed to tombstone doc handle for "${filePath}"`, err);
       });
     }
+    return { trashItemId: null };
+  }
+
+  /**
+   * Move `src` (file or folder) to `trashPath`. Like `move` minus the checks,
+   * link rewriting and attachment-path rewriting: the item must come back
+   * byte for byte. Share links, grants and doc handles follow it, so they
+   * stay dormant at the trash path (which no API can reach) until restore.
+   */
+  async relocateForTrash(src: string, trashPath: string, trashItemId: string): Promise<void> {
+    for (const hooks of this.moveHooks) {
+      await hooks.beforeMove?.(src, trashPath);
+    }
+    await this.storage.move(src, trashPath);
+    try {
+      await this.relocateBookkeeping(src, trashPath);
+    } finally {
+      for (const hooks of this.moveHooks) {
+        try {
+          await hooks.afterTrash?.(src, trashPath, trashItemId);
+        } catch (err) {
+          this.logger.error(`afterTrash hook failed for "${src}"`, err);
+        }
+      }
+    }
+  }
+
+  /** Move a trashed item back to `dest`; parent folders are created. */
+  async relocateFromTrash(trashPath: string, dest: string): Promise<void> {
+    await this.storage.move(trashPath, dest);
+    await this.relocateBookkeeping(trashPath, dest);
+  }
+
+  private async relocateBookkeeping(src: string, dest: string): Promise<void> {
+    const srcSidecar = this.sidecarPath(src);
+    if (await this.storage.exists(srcSidecar)) {
+      await this.storage.move(srcSidecar, this.sidecarPath(dest));
+    }
+    if (this.shareLinks) {
+      await this.shareLinks.updatePath(src, dest);
+      await this.shareLinks.updatePathPrefix(src, dest);
+    }
+    if (this.grants) {
+      await this.grants.cascadeRename(src, dest);
+    }
+    if (this.docHandles) {
+      await this.docHandles.updatePathByPath(src, dest);
+      await this.docHandles.updatePathPrefix(src, dest);
+    }
   }
 
   async createDirectory(dirPath: string, userEmail?: string): Promise<void> {
@@ -281,6 +359,8 @@ export class FilesService extends EventEmitter {
   /**
    * Unified create — picks "Untitled note" / "New folder" when name is omitted,
    * resolves collisions by appending " 2", " 3", … (the leaf segment, before extension).
+   * `content` builds a note's initial body from the resolved leaf name, so a
+   * template's `{{title}}` matches the file actually created.
    */
   async createItem(
     kind: 'note' | 'folder',
@@ -288,6 +368,7 @@ export class FilesService extends EventEmitter {
     name: string | undefined,
     userId?: number,
     userEmail?: string,
+    content?: (leaf: string) => string,
   ): Promise<{ path: string }> {
     const cleanParent = (parentPath || '').replace(/^\/+|\/+$/g, '');
     if (userEmail) await this.assertWritable(cleanParent, userEmail);
@@ -302,7 +383,7 @@ export class FilesService extends EventEmitter {
       const fullPath = cleanParent ? `${cleanParent}/${fileName}` : fileName;
       if (!(await this.storage.exists(fullPath))) {
         if (kind === 'note') {
-          await this.createFile(fullPath, '', userId, undefined, userEmail);
+          await this.createFile(fullPath, content ? content(leaf) : '', userId, undefined, userEmail);
         } else {
           await this.createDirectory(fullPath, userEmail);
         }
@@ -313,17 +394,23 @@ export class FilesService extends EventEmitter {
     }
   }
 
-  async deleteDirectory(dirPath: string, userEmail?: string): Promise<void> {
+  /** Delete a folder: to the trash, or permanently (see `deleteFile`). */
+  async deleteDirectory(dirPath: string, userEmail?: string, userId?: number): Promise<{ trashItemId: string | null }> {
     if (userEmail) {
       await this.assertWritable(dirPath, userEmail);
       if (isPersonalRootSegment(dirPath)) {
         throw new BadRequestException('Personal folder cannot be deleted');
       }
     }
+    if (this.trashHandler && !isE2EPath(dirPath)) {
+      return { trashItemId: await this.trashHandler.trash(dirPath, { userId, email: userEmail }) };
+    }
+    this.fileWatcher?.markSelfRemoved(dirPath);
     await this.storage.delete(dirPath);
     if (this.grants) {
       await this.grants.cascadeDelete(dirPath);
     }
+    return { trashItemId: null };
   }
 
   registerMoveHooks(hooks: MoveHooks): void {
@@ -354,6 +441,7 @@ export class FilesService extends EventEmitter {
     for (const hooks of this.moveHooks) {
       await hooks.beforeMove?.(src, dest);
     }
+    this.fileWatcher?.markSelfMoved(src);
     await this.storage.move(src, dest);
     try {
       // Move sidecar file too

@@ -2,11 +2,16 @@ import React, { useState, useEffect, useCallback } from 'react';
 import * as api from '../api';
 import type { BacklinkEntry, OutgoingLinkEntry, UnlinkedMentionEntry } from '../api';
 import { GraphPanel } from './GraphPanel';
+import { RelatedNotesSection } from './RelatedNotesSection';
 
 interface BacklinksPanelProps {
   activeFile: string;
   onNavigate: (path: string) => void;
   onPopOutGraph?: () => void;
+  /** Revision of the open note; lets the Related section refresh after edits. */
+  revision?: number;
+  /** Appends a wikilink to the open note; omitted when it is read-only. */
+  onInsertLink?: (path: string) => boolean;
 }
 
 function noteTitle(filePath: string): string {
@@ -14,7 +19,7 @@ function noteTitle(filePath: string): string {
   return basename.replace(/\.md$/, '');
 }
 
-export function BacklinksPanel({ activeFile, onNavigate, onPopOutGraph }: BacklinksPanelProps) {
+export function BacklinksPanel({ activeFile, onNavigate, onPopOutGraph, revision, onInsertLink }: BacklinksPanelProps) {
   const [backlinks, setBacklinks] = useState<BacklinkEntry[]>([]);
   const [outgoing, setOutgoing] = useState<OutgoingLinkEntry[]>([]);
   const [mentions, setMentions] = useState<UnlinkedMentionEntry[]>([]);
@@ -174,6 +179,13 @@ export function BacklinksPanel({ activeFile, onNavigate, onPopOutGraph }: Backli
           </div>
         )}
       </details>
+
+      <RelatedNotesSection
+        activeFile={activeFile}
+        revision={revision}
+        onNavigate={onNavigate}
+        onInsertLink={onInsertLink}
+      />
     </div>
   );
 }

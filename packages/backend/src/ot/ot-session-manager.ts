@@ -115,6 +115,25 @@ export class OTSessionManager {
     return { displaced };
   }
 
+  /**
+   * Drop a session without the close-time flush or close handler: its file
+   * has left the vault (moved to the trash), so flushing would re-create it at
+   * `docId`. Returns the clients that were attached, plus the in-memory
+   * content when it holds edits not yet on disk.
+   */
+  discardSession(docId: string): { clients: WebSocket[]; unflushed: string | null } | null {
+    const session = this.sessions.get(docId);
+    if (!session) return null;
+    if (session.flushTimer) clearTimeout(session.flushTimer);
+    if (session.inactivityTimer) clearTimeout(session.inactivityTimer);
+    this.sessions.delete(docId);
+    this.logger.debug(`Discarded session "${docId}", dirty=${session.dirty}`);
+    return {
+      clients: [...session.clients.keys()],
+      unflushed: session.dirty ? session.content : null,
+    };
+  }
+
   resetContent(docId: string, newContent: string): void {
     const session = this.sessions.get(docId);
     if (!session) return;

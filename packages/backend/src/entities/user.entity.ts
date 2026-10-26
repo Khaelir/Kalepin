@@ -20,6 +20,10 @@ export class User {
   @Column({ type: 'simple-json', default: '[]' })
   completedTours!: { tourId: string; version: number }[];
 
+  /** Notification email preference: 'all' | 'mentions' | 'none'. In-app items ignore it. */
+  @Column({ type: 'varchar', default: 'all' })
+  emailNotifications!: 'all' | 'mentions' | 'none';
+
   // ---- _secure/ vault state ----------------------------------------------
   // Server-opaque blobs: the master-KEK wrapped against passphrase-derived and
   // recovery-derived keys. The server never holds the unwrapped master-KEK.

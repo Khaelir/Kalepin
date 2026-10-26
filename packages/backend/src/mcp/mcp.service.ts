@@ -22,8 +22,12 @@ import {
   ENCRYPTION_PREDICATES,
   EncryptionPredicates,
 } from '../crypto/encryption-predicates';
-import { PinService } from '../pin';
+import { PinService, PinLockedException } from '../pin';
 import { DocHandlesService, type ResolveResult } from '../doc-handles';
+import { TemplatesService, type TemplateActor } from '../templates/templates.service';
+import { resolveTimeZone, todayIn } from '../templates/template-renderer';
+import { RelatedNotesService, type RelatedNotesResult } from '../search/related-notes.service';
+import { TagIndexService } from '../tags/tag-index.service';
 
 /** Shared schema text for the `id` argument every note-targeting tool accepts. */
 const NOTE_ID_DESCRIPTION =
@@ -88,6 +92,9 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     private readonly docHandles: DocHandlesService,
     @Optional() private readonly backupService?: BackupService,
     @Optional() private readonly oauthEvents?: OAuthEventBus,
+    @Optional() private readonly templates?: TemplatesService,
+    @Optional() private readonly relatedNotes?: RelatedNotesService,
+    @Optional() private readonly tagIndex?: TagIndexService,
   ) {
     this.appUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
 
@@ -191,6 +198,28 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       return;
     }
     throw new Error(`pin-protected: ${path}`);
+  }
+
+  /** Template reads carry the caller's one-shot unlock header, like other reads. */
+  private templateActor(user: McpUser): TemplateActor {
+    return {
+      email: user.email.toLowerCase(),
+      userId: user.sub,
+      unlock: { headers: { 'x-kalepin-unlock': user.pinUnlockHeader } },
+    };
+  }
+
+  /** Surface a locked template as the `pin-protected: <path>` error write tools use. */
+  private async withTemplatePinError<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof PinLockedException) {
+        const locked = (err.getResponse() as { path?: string }).path ?? '';
+        throw new Error(`pin-protected: ${locked}`);
+      }
+      throw err;
+    }
   }
 
   /**
@@ -381,12 +410,15 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     'read_attachment',
     'list_files',
     'list_comments',
+    'related_notes',
+    'list_tags',
     // Write tools (canWriteNotes)
     'create_note',
     'patch_note',
     'append_to_note',
     'edit_note',
     'delete_note',
+    'daily_note',
     // Comment-write tools (canWrite)
     'add_comment',
     'resolve_comment',
@@ -455,8 +487,8 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     server.registerTool(
       'search_notes',
       {
-        description: 'Search across all notes and comments using full-text and semantic search. Results may include comments (type: "comment") with full thread text — comments often contain important context, decisions, or metadata not present in the note body. Each result carries the note\'s stable `id`, which other tools accept in place of `path`.',
-        inputSchema: { query: z.string().describe('Search query') },
+        description: 'Search across all notes and comments using full-text and semantic search. Results may include comments (type: "comment") with full thread text — comments often contain important context, decisions, or metadata not present in the note body. Each result carries the note\'s stable `id`, which other tools accept in place of `path`. Add `tag:<name>` to keep only notes carrying that tag (frontmatter or inline #tag, case-insensitive; `tag:project` also matches nested tags like project/kalepin); several tag: tokens must all match. A query made only of tag: tokens lists the tagged notes, most recently modified first (each with `modifiedAt`). Use list_tags to discover tags.',
+        inputSchema: { query: z.string().describe('Search query, optionally with tag:<name> filters (e.g. "tag:meeting budget")') },
       },
       this.wrapTool('search_notes', user, async ({ query }) => {
         const results = await this.searchService.search(query, 'mcp', user.email.toLowerCase());
@@ -676,24 +708,98 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       }),
     );
 
+    server.registerTool(
+      'related_notes',
+      {
+        description: 'Find the notes most semantically similar to a note (embedding similarity of the whole note, not keywords). Each result carries the stable `id`, a `score`, `linked` (true when either note already links to the other) and a `reason` naming the best-matching sections with an excerpt. Useful to discover connections and suggest [[links]] for the unlinked ones.',
+        inputSchema: {
+          path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
+          limit: z.number().int().min(1).max(20).optional().describe('Maximum number of related notes (default 5, max 20)'),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      this.wrapTool('related_notes', user, async ({ path, id, limit }) => {
+        const email = user.email.toLowerCase();
+        const resolved = await this.resolveNoteRef({ path, id }, email);
+        if (resolved.length === 0) {
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id ?? path}".` }] };
+        }
+        if (resolved.length > 1) {
+          const listing = resolved.map((r) => `- ${r.path}`).join('\n');
+          return { content: [{ type: 'text' as const, text: `Multiple notes match "${path}":\n${listing}\nPlease use the full path.` }] };
+        }
+        const notePath = resolved[0].path;
+        const pinSentinel = await this.pinReadSentinel(notePath, user);
+        if (pinSentinel) return pinSentinel;
+        if (this.encryptionPredicates.isE2EEncrypted(notePath)) {
+          return { content: [{ type: 'text' as const, text: `kind: e2e-encrypted\npath: ${notePath}\nRelated notes are not available for end-to-end encrypted notes.` }] };
+        }
+        const result: RelatedNotesResult = this.relatedNotes
+          ? await this.relatedNotes.findRelated(notePath, { limit, userEmail: email })
+          : { available: false, items: [] };
+        if (!result.available) {
+          return { content: [{ type: 'text' as const, text: 'Related notes are unavailable: the semantic index (embedding model) is not loaded.' }] };
+        }
+        const ids = await this.docHandles.findOrCreateForPaths(result.items.map((r) => r.path));
+        const items = result.items.map((r) => ({
+          path: r.path,
+          id: ids.get(r.path),
+          title: r.title,
+          score: Math.round(r.score * 1000) / 1000,
+          linked: r.linked,
+          reason: r.reason,
+        }));
+        return { content: [{ type: 'text' as const, text: JSON.stringify(items) }], _logOpts: { resultCount: items.length } };
+      }),
+    );
+
+    server.registerTool(
+      'list_tags',
+      {
+        description: 'List the tags used in the notes you can see, with how many notes carry each. Tags come from frontmatter `tags:` and inline #tags, case-insensitive; a nested tag (project/kalepin) also counts toward its parent (project). Pass a tag to search_notes as `tag:<name>` to find its notes.',
+        inputSchema: {},
+        annotations: { readOnlyHint: true },
+      },
+      this.wrapTool('list_tags', user, async () => {
+        const tags = this.tagIndex ? await this.tagIndex.listTags(user.email.toLowerCase()) : [];
+        return { content: [{ type: 'text' as const, text: JSON.stringify(tags) }], _logOpts: { resultCount: tags.length } };
+      }),
+    );
+
     // --- Write Tools (note mutation — requires rw or admin scope) ---
 
     if (canWriteNotes) {
     server.registerTool(
       'create_note',
       {
-        description: 'Create a new note',
+        description: 'Create a new note, optionally from a template: a note in the Templates folder whose {{title}}, {{date}}, {{time}}, {{date:FORMAT}}, {{author}} and {{author_email}} variables are filled in.',
         inputSchema: {
           path: z.string().describe('Path for the new note (e.g. "ideas/new-idea.md")'),
-          content: z.string().describe('Markdown content for the note'),
+          content: z.string().optional().describe('Markdown content for the note. With a template, it is appended after the rendered template.'),
+          template: z.string().optional().describe('Template to start from: a template name such as "Meeting notes" or a note path such as "Templates/Meeting notes.md"'),
+          timezone: z.string().optional().describe('IANA timezone for template dates, e.g. "Europe/Paris" (default: server timezone)'),
         },
       },
-      this.wrapTool('create_note', user, async ({ path, content }) => {
+      this.wrapTool('create_note', user, async ({ path, content, template, timezone }) => {
         // createFile appends `.md` when missing; check the PIN of, and mint the
         // id for, the path it actually writes.
         const writtenPath = path.endsWith('.md') ? path : `${path}.md`;
         await this.assertPinUnlockedForWrite(writtenPath, user);
-        await this.filesService.createFile(writtenPath, content, user.sub, undefined, user.email.toLowerCase());
+        let body = content ?? '';
+        if (template) {
+          if (!this.templates) throw new Error('Templates are not available on this server.');
+          if (this.encryptionPredicates.isE2EEncrypted(writtenPath)) {
+            throw new Error('Templates cannot be used in end-to-end encrypted folders.');
+          }
+          const title = (writtenPath.split('/').pop() ?? writtenPath).replace(/\.md$/, '');
+          const templates = this.templates;
+          const rendered = await this.withTemplatePinError(() =>
+            templates.renderTemplateRef(template, { title, timezone }, this.templateActor(user)),
+          );
+          body = body ? `${rendered.replace(/\s+$/, '')}\n\n${body}` : rendered;
+        }
+        await this.filesService.createFile(writtenPath, body, user.sub, undefined, user.email.toLowerCase());
         const id = await this.docHandles.findOrCreateForPath(writtenPath);
         return { content: [{ type: 'text' as const, text: `Created note: ${writtenPath} (id: ${id})` }] };
       }),
@@ -788,7 +894,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     server.registerTool(
       'delete_note',
       {
-        description: 'Delete a note',
+        description: 'Delete a note by moving it to the Trash. It can be restored from Trash in the Kalepin UI until the trash is emptied or the retention period ends. Notes in the encrypted folder (_secure/) are deleted permanently.',
         inputSchema: {
           path: z.string().optional().describe('Path to the note to delete'),
           id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
@@ -807,10 +913,43 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         }
         const resolvedPath = resolved[0].path;
         await this.assertPinUnlockedForWrite(resolvedPath, user);
-        await this.filesService.deleteFile(resolvedPath, user.sub, email);
-        return { content: [{ type: 'text' as const, text: `Deleted note: ${resolvedPath}` }] };
+        const { trashItemId } = await this.filesService.deleteFile(resolvedPath, user.sub, email);
+        const text = trashItemId
+          ? `Moved note to Trash: ${resolvedPath}. It can be restored from Trash.`
+          : `Deleted note permanently: ${resolvedPath}`;
+        return { content: [{ type: 'text' as const, text }] };
       }),
     );
+
+    if (this.templates) {
+      const templates = this.templates;
+
+      server.registerTool(
+        'daily_note',
+        {
+          description: "Get the user's daily journal note for a date (default: today), creating it from the Daily template if it does not exist yet. Returns JSON with path, id, created and content.",
+          inputSchema: {
+            date: z.string().optional().describe('Day as YYYY-MM-DD (default: today in timezone)'),
+            timezone: z.string().optional().describe('IANA timezone used for "today" and template dates, e.g. "Europe/Paris" (default: server timezone)'),
+          },
+        },
+        this.wrapTool('daily_note', user, async ({ date, timezone }) => {
+          const email = user.email.toLowerCase();
+          const day = date ?? todayIn(resolveTimeZone(timezone));
+          const note = await this.withTemplatePinError(() =>
+            templates.dailyNote({ date: day, timezone }, this.templateActor(user)),
+          );
+          const id = note.id ?? (await this.docHandles.findOrCreateForPath(note.path));
+          const result: Record<string, unknown> = { path: note.path, id, created: note.created };
+          if (await this.pinReadSentinel(note.path, user)) {
+            result.kind = 'pin-protected';
+          } else {
+            result.content = await this.filesService.readFile(note.path, email);
+          }
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+        }),
+      );
+    }
     } // end canWriteNotes
 
     server.registerTool(

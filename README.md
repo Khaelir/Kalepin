@@ -11,6 +11,11 @@ Notes are stored as plain `.md` files on disk — compatible with Obsidian and a
 - **Hybrid search** — Full-text (FTS5/BM25) and semantic vector search using local embeddings (`multilingual-e5-base`).
 - **Slash commands** — Type `/` in the editor to insert headings, tables, task lists, images, links, and more.
 - **Comments** — Thread-based comments attached to content blocks, stored in sidecar files to keep your markdown clean.
+- **Tags** — Obsidian-style tags from frontmatter `tags:` and inline `#tag`, nested (`#project/kalepin` counts toward `project`) and case-insensitive. Browse them in the sidebar's Tags section, click any tag to search for it, or type `tag:name` in search (⌘K); several `tag:` tokens must all match, and a query of only `tag:` tokens lists those notes, newest first.
+- **Related notes** — The Backlinks panel lists the notes most semantically similar to the open one (same local embeddings as search), with the matching section and a "not linked" marker; one click appends a `[[link]]`.
+- **Templates & daily notes** — Obsidian-compatible templates (`{{title}}`, `{{date}}`, `{{time}}`, `{{date:FORMAT}}`, `{{author}}`) from a `Templates/` folder, shared or personal. ⌘⇧D / Ctrl+Shift+D opens today's journal note, created from `Daily.md` when it exists.
+- **Notifications** — The bell in the top bar lists mentions (in comments and note bodies), replies in threads you're part of, and notes shared with you, with a live unread badge. Each user picks which notifications are also emailed under **Settings → Email notifications**; every email has a one-click unsubscribe link.
+- **Trash** — Deleting a note or folder moves it to a `.trash/` folder (Obsidian's convention; one per zone, so personal items stay private). Restore it from the sidebar's Trash or with Undo right after deleting: it comes back at the same path with its comments, share links, grants, stars, PIN and `/doc/` link. Items are purged after `TRASH_RETENTION_DAYS`. Notes in the Encrypted Folder are still deleted permanently.
 - **MCP server** — Give Claude (or any MCP client) full access to your notes: search, read, create, edit, comment.
 - **Magic link auth** — Passwordless email authentication with domain allowlists.
 - **Microsoft sign-in (optional)** — "Sign in with Microsoft" for one Entra ID tenant, next to the magic link. See [docs/microsoft-sso.md](docs/microsoft-sso.md).
@@ -90,6 +95,11 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `KALEPIN_KEK` | — | Dev/test fallback: hex-encoded 32-byte KEK. Refused when `NODE_ENV=production` unless `KALEPIN_KEK_FILE` is also set. |
 | `ACCESS_LOG_RETENTION_DAYS` | `90` | Days to retain `note_access_log` rows; a daily cron prunes older rows. `0` disables retention (see [Privacy & access logs](#privacy--access-logs)). |
 | `ACCESS_LOG_IP_SALT` | auto | Per-deployment salt used to HMAC client IPs in the access log. Auto-generated to `<DB_PATH dir>/.access-log-salt` if unset. |
+| `TRASH_RETENTION_DAYS` | `30` | Days a deleted note or folder stays in the trash before a daily job purges it. `0` keeps trashed items until someone deletes them forever. |
+| `TEMPLATES_FOLDER` | `Templates` | Templates folder, at the vault root (shared) and in each personal folder (owner only). |
+| `DAILY_NOTES_FOLDER` | `Journal` | Daily notes folder: inside the personal folder when `PERSONAL_PATH` is set, else at the vault root. |
+| `RELATED_NOTES_MIN_SCORE` | `0.88` | Minimum embedding similarity for a note to appear under Related. e5 scores sit in a narrow band; raise it if loosely related notes show up. |
+| `NOTIFICATION_RETENTION_DAYS` | `90` | Days to keep **read** in-app notifications; a daily job deletes older read items. Unread items are never pruned. `0` disables pruning. |
 
 ## Personal folders
 
@@ -321,12 +331,15 @@ The flow uses OAuth 2.1 with PKCE and Dynamic Client Registration (RFC 7591). Ad
 
 | Tool | Description |
 |---|---|
-| `search_notes` | Full-text and semantic search across all notes |
+| `search_notes` | Full-text and semantic search across all notes; `tag:<name>` tokens filter by tag |
 | `read_note` | Read the full markdown content of a note |
 | `list_files` | Get the file tree |
-| `create_note` | Create a new note |
+| `list_tags` | List the tags in notes you can see, with counts |
+| `related_notes` | Notes most semantically similar to a note, with why they match and whether they're linked |
+| `create_note` | Create a new note, optionally from a template (`template`, `timezone`) |
+| `daily_note` | Open or create today's (or a given date's) daily note |
 | `edit_note` | Update an existing note |
-| `delete_note` | Delete a note |
+| `delete_note` | Move a note to the trash (restorable from Trash) |
 | `add_comment` | Add a comment to a content block |
 | `list_comments` | List comments on a note |
 | `resolve_comment` | Resolve or unresolve a comment thread |

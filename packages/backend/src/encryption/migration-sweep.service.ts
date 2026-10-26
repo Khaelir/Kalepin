@@ -22,6 +22,7 @@ import {
 } from '../crypto/envelope';
 import { EncryptionZoneName } from '../entities/encryption-zone.entity';
 import { PERSONAL_PREFIX } from '../auth/visibility';
+import { skipSweepEntry } from './sweep-entry-filter';
 
 export type SweepTarget = 'encrypt' | 'decrypt';
 
@@ -332,7 +333,8 @@ export class MigrationSweepService implements OnApplicationBootstrap {
   /**
    * Walk the physical root yielding relative file paths. Skips dotfiles,
    * `.deleted/`, the reserved `_users/` segment at the root of the shared
-   * vault, and `.tmp.*` leftovers.
+   * vault, and `.tmp.*` leftovers. The zone trash folder is walked: trashed
+   * notes are restorable and must follow the zone's encryption state.
    */
   private async *walk(
     root: string,
@@ -349,7 +351,7 @@ export class MigrationSweepService implements OnApplicationBootstrap {
         continue;
       }
       for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue;
+        if (skipSweepEntry(entry.name, entry.isDirectory(), rel, zone)) continue;
         if (
           zone === 'shared' &&
           rel === '' &&

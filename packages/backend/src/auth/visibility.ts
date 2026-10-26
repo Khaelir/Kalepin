@@ -23,15 +23,35 @@ export function isCanonicalPath(virtualPath: string): boolean {
   return virtualPath.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
 }
 
+/** Per-zone trash folder name (Obsidian's convention): `.trash/` at the vault
+ *  root, `_users/{email}/.trash/` in a personal folder. */
+export const TRASH_DIR = '.trash';
+
+/**
+ * True for a zone trash root or anything under it: `.trash[/...]` or
+ * `_users/{email}/.trash[/...]`. Trashed items are reachable only through the
+ * trash API, so every visibility check treats these paths as missing.
+ */
+export function isTrashPath(virtualPath: string): boolean {
+  let tail = virtualPath;
+  if (virtualPath.startsWith(PERSONAL_PREFIX)) {
+    const slash = virtualPath.indexOf('/', PERSONAL_PREFIX.length);
+    if (slash < 0) return false;
+    tail = virtualPath.slice(slash + 1);
+  }
+  return tail === TRASH_DIR || tail.startsWith(TRASH_DIR + '/');
+}
+
 /**
  * Synchronous "owner-or-shared-vault" check. Returns true when the path is
  * shared (non-personal) or when it falls under the viewer's own personal root.
  * Foreign personal paths return false here regardless of grants — the
  * grant-aware variant lives in `GrantAwareVisibility`. Non-canonical paths
- * are never visible.
+ * and trash paths are never visible.
  */
 export function isVisibleTo(virtualPath: string, viewerEmail: string): boolean {
   if (!isCanonicalPath(virtualPath)) return false;
+  if (isTrashPath(virtualPath)) return false;
   if (!isUnderPersonalRoot(virtualPath)) return true;
   const root = personalRootFor(viewerEmail);
   return virtualPath === root || virtualPath.startsWith(root + '/');

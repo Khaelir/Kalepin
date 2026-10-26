@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { DocumentGrant, GrantPermission } from '../entities/document-grant.entity';
+import { isTrashPath } from '../auth/visibility';
 
 export interface MintInput {
   grantorEmail: string;
@@ -99,14 +100,16 @@ export class GrantsService {
     return rows.reduce((best, cur) => (rank(cur.permission) > rank(best.permission) ? cur : best));
   }
 
+  /** Active grants for a grantee. Grants on trashed notes are dormant and left out. */
   async listForGrantee(granteeEmail: string, now: number = Date.now()): Promise<DocumentGrant[]> {
-    return this.repo
+    const rows = await this.repo
       .createQueryBuilder('g')
       .where('g.granteeEmail = :grantee', { grantee: granteeEmail })
       .andWhere('g.revokedAt IS NULL')
       .andWhere('(g.expiresAt IS NULL OR g.expiresAt > :now)', { now })
       .orderBy('g.createdAt', 'DESC')
       .getMany();
+    return rows.filter((g) => !isTrashPath(g.path));
   }
 
   async listForGrantor(grantorEmail: string, includeInactive = false, now: number = Date.now()): Promise<DocumentGrant[]> {
@@ -117,7 +120,7 @@ export class GrantsService {
       qb.andWhere('g.revokedAt IS NULL').andWhere('(g.expiresAt IS NULL OR g.expiresAt > :now)', { now });
     }
     qb.orderBy('g.createdAt', 'DESC');
-    return qb.getMany();
+    return (await qb.getMany()).filter((g) => !isTrashPath(g.path));
   }
 
   /** Update active grants whose path = src or path STARTSWITH src + '/'. */

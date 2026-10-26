@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { DocHandle } from '../entities/doc-handle.entity';
+import { isTrashPath } from '../auth/visibility';
 
 /** Base32 alphabet RFC 4648 (`A-Z2-7`). 5 bits per char × 16 chars = 80 bits. */
 const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -45,6 +46,9 @@ export class DocHandlesService {
    * existing row is tombstoned for the same path (e.g. a backup-restore corner
    * case where the file reappears at the same path), the row is reactivated. */
   async findOrCreateForPath(path: string): Promise<string> {
+    // A trashed note's handle sits tombstoned at its trash path until restore;
+    // never revive it (or mint one) from a lookup.
+    if (isTrashPath(path)) throw new NotFoundException('Handle not found');
     const existing = await this.repo.findOne({ where: { path } });
     if (existing) {
       if (existing.tombstoneAt !== null) {
@@ -183,6 +187,32 @@ export class DocHandlesService {
       .where('path = :path', { path })
       .andWhere('tombstoneAt IS NULL')
       .execute();
+  }
+
+  /** Tombstone the row at `path` and every row under `path/`. Used when a note
+   * or folder moves to the trash (its rows were re-pathed there first). */
+  async tombstoneAtOrUnder(path: string): Promise<void> {
+    const now = Date.now();
+    for (const row of await this.rowsAtOrUnder(path)) {
+      if (row.tombstoneAt !== null) continue;
+      await this.repo.update({ id: row.id }, { tombstoneAt: now });
+    }
+  }
+
+  /** Reactivate the row at `path` and every row under `path/` (trash restore). */
+  async untombstoneAtOrUnder(path: string): Promise<void> {
+    for (const row of await this.rowsAtOrUnder(path)) {
+      if (row.tombstoneAt === null) continue;
+      await this.repo.update({ id: row.id }, { tombstoneAt: null });
+    }
+  }
+
+  private async rowsAtOrUnder(path: string): Promise<DocHandle[]> {
+    const rows = await this.repo
+      .createQueryBuilder('h')
+      .where('h.path = :path OR substr(h.path, 1, length(:prefix)) = :prefix', { path, prefix: `${path}/` })
+      .getMany();
+    return rows.filter((r) => r.path === path || r.path.startsWith(path + '/'));
   }
 
   /** Reactivate a tombstoned row. Used by the backup-restore corner case where

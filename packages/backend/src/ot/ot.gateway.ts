@@ -35,6 +35,7 @@ import {
 import { AccessLogService } from '../access-log/access-log.service';
 import { DocHandlesService } from '../doc-handles/doc-handles.service';
 import { PinService } from '../pin/pin.service';
+import { NotificationInboxService } from '../notifications/notification-inbox.service';
 
 interface AuthenticatedWebSocket extends WebSocket {
   user?: JwtPayload;
@@ -78,6 +79,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly docHandles: DocHandlesService,
     private readonly pinService: PinService,
     @Optional() @Inject(forwardRef(() => LinkIndexService)) private readonly linkIndexService?: LinkIndexService,
+    @Optional() private readonly notificationInbox?: NotificationInboxService,
   ) {
     // Wire OT broadcast so rename-rewriting can push ops to clients
     this.linkIndexService?.setOTBroadcast((docId, ops, rev) => {
@@ -152,6 +154,13 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.filesService.registerMoveHooks({
       beforeMove: (src) => this.otService.flushSessionsUnder(src),
       afterMove: (src, dest) => this.followRename(src, dest),
+      afterTrash: (src, trashPath, trashItemId) => this.closeTrashedSessions(src, trashPath, trashItemId),
+    });
+
+    // Inbox changed (item created or read): nudge only that user's sessions to
+    // re-fetch their unread count. The frame carries no path or content.
+    this.notificationInbox?.onChanged((email) => {
+      this.fanoutToEmail(email, { type: 'notifications:changed' });
     });
 
     // Subscribe to external file writes (e.g. MCP)
@@ -449,6 +458,26 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
         if (client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify({ type: 'doc:moved', from, to }));
         }
+      }
+    }
+  }
+
+  /**
+   * `src` was moved to the trash: drop its live sessions (a later flush would
+   * re-create the file) and tell their clients, so editors close instead of
+   * sending ops into the void.
+   */
+  private async closeTrashedSessions(src: string, trashPath: string, trashItemId: string): Promise<void> {
+    const dropped = await this.otService.discardSessionsUnder(src, trashPath);
+    for (const { docId, clients } of dropped) {
+      this.movedDocIds.delete(docId);
+      // `trashedPath` is the trashed item itself (the doc or a folder above
+      // it), so a client can follow the doc when the item is restored.
+      const frame = JSON.stringify({ type: 'doc:trashed', docId, trashItemId, trashedPath: src });
+      for (const ws of clients) {
+        const client = ws as AuthenticatedWebSocket;
+        if (client.docId === docId) client.docId = undefined;
+        if (client.readyState === WebSocket.OPEN) client.send(frame);
       }
     }
   }

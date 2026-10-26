@@ -179,7 +179,11 @@ export class EncryptingStorageAdapter implements StorageAdapter {
     }
   }
 
-  /** Walks `src`, re-encrypting each file at `dest` (rebinding AAD), then deletes `src`. */
+  /**
+   * Walks `src`, re-encrypting each file at `dest` (rebinding AAD), then
+   * deletes `src`. `list` skips dot entries, so each file's comment sidecar
+   * (`.<name>.collab`) is carried explicitly; other dot entries are dropped.
+   */
   private async moveDirectoryReencrypt(src: string, dest: string): Promise<void> {
     const entries = await this.inner.list(src);
     for (const e of entries) {
@@ -190,6 +194,10 @@ export class EncryptingStorageAdapter implements StorageAdapter {
       } else {
         const buf = await this.readBytes(childSrc);
         await this.writeBytes(childDest, buf);
+        const sidecar = sidecarPathOf(childSrc);
+        if (await this.inner.exists(sidecar)) {
+          await this.writeBytes(sidecarPathOf(childDest), await this.readBytes(sidecar));
+        }
       }
     }
     await this.inner.delete(src);
@@ -231,4 +239,11 @@ export class EncryptingStorageAdapter implements StorageAdapter {
 
 function kindFor(virtualPath: string): EnvelopeKind {
   return virtualPath.includes('/_attachments/') ? 'attachment' : 'note';
+}
+
+/** Comment sidecar next to a note: `dir/.name.md.collab` (see SidecarService). */
+function sidecarPathOf(virtualPath: string): string {
+  const slash = virtualPath.lastIndexOf('/');
+  const dir = slash < 0 ? '' : virtualPath.slice(0, slash + 1);
+  return `${dir}.${virtualPath.slice(slash + 1)}.collab`;
 }

@@ -7,6 +7,7 @@ import { ConnectClaudeWizard } from './ConnectClaudeWizard';
 import { EncryptionSettings } from './Settings/EncryptionSettings';
 import { PinnedNotesSection } from './Settings/PinnedNotesSection';
 import { SharingSection } from './Settings/SharingSection';
+import { EmailNotificationsSection } from './Settings/EmailNotificationsSection';
 import { SecuritySettings } from './Settings/SecuritySettings';
 import { SECURE_FOLDER_ENABLED } from '../feature-flags';
 import { authHeaders } from '../auth';
@@ -513,6 +514,8 @@ export function SettingsPage({ onBack, completedTours = [], onStartTour }: Setti
         <PinnedNotesSection />
 
         <SharingSection />
+
+        <EmailNotificationsSection />
 
         <section className="settings-section tutorials-section">
           <h2 className="settings-section-title">Tutorials</h2>

@@ -1,4 +1,4 @@
-import { Injectable, Inject, forwardRef, Logger } from '@nestjs/common';
+import { Injectable, Inject, forwardRef, Logger, Optional } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { SidecarService } from './sidecar.service';
 import { SearchService } from '../search/search.service';
@@ -6,6 +6,7 @@ import { DailyStatsService } from '../stats/daily-stats.service';
 import { NotificationService } from './notification.service';
 import { MentionTrackingService } from './mention-tracking.service';
 import { StarsService } from '../stars/stars.service';
+import { NotificationInboxService, RecordInput } from '../notifications/notification-inbox.service';
 import { extractMentions } from './extract-mentions';
 import { CommentThread, Comment, SidecarData } from '@kalepin/shared';
 
@@ -21,6 +22,7 @@ export class CommentsService {
     private readonly notificationService: NotificationService,
     private readonly mentionTracking: MentionTrackingService,
     private readonly starsService: StarsService,
+    @Optional() private readonly inbox?: NotificationInboxService,
   ) {}
 
   private findThread(
@@ -265,7 +267,7 @@ export class CommentsService {
     for (const email of mentions) {
       if (email === author) continue;
 
-      this.processMentionNotification(email, author, filePath, threadId, commentId).catch((err) => {
+      this.processMentionNotification(email, author, filePath, threadId, commentId, text).catch((err) => {
         this.logger.error(`Failed to process mention notification for ${email}`, err);
       });
     }
@@ -277,6 +279,7 @@ export class CommentsService {
     filePath: string,
     threadId: string,
     commentId: string,
+    text: string,
   ): Promise<void> {
     const mentionedUserId = await this.notificationService.resolveUserId(mentionedEmail);
     if (!mentionedUserId) return;
@@ -287,6 +290,16 @@ export class CommentsService {
     // Auto-star
     await this.starsService.autoStarForUser(mentionedUserId, filePath).catch((err) => {
       this.logger.error(`Failed to auto-star ${filePath} for user ${mentionedUserId}`, err);
+    });
+
+    await this.recordInboxItem({
+      type: 'comment_mention',
+      recipientEmail: mentionedEmail,
+      actorEmail: authorEmail,
+      path: filePath,
+      threadId,
+      commentId,
+      snippet: text,
     });
 
     const approved = await this.mentionTracking.shouldSend(
@@ -330,6 +343,25 @@ export class CommentsService {
     // Remove the reply author
     allEmails.delete(authorEmail);
 
+    // Earlier verified commenters who were never mentioned get the in-app
+    // item only — who receives reply emails is unchanged.
+    const notified = new Set([authorEmail, ...allEmails].map((e) => e.toLowerCase()));
+    const commenters = new Set(
+      existingComments.filter((c) => c.authorVerified !== false).map((c) => c.author.toLowerCase()),
+    );
+    for (const email of commenters) {
+      if (notified.has(email)) continue;
+      void this.recordInboxItem({
+        type: 'thread_reply',
+        recipientEmail: email,
+        actorEmail: authorEmail,
+        path: filePath,
+        threadId,
+        commentId: newComment.id,
+        snippet: newComment.text,
+      });
+    }
+
     for (const email of allEmails) {
       const isDirectMention = newMentions.has(email);
 
@@ -367,6 +399,16 @@ export class CommentsService {
       this.logger.error(`Failed to auto-star ${filePath} for user ${mentionedUserId}`, err);
     });
 
+    await this.recordInboxItem({
+      type: isDirectMention ? 'comment_mention' : 'thread_reply',
+      recipientEmail: mentionedEmail,
+      actorEmail: authorEmail,
+      path: filePath,
+      threadId,
+      commentId,
+      snippet: replyText,
+    });
+
     const approved = await this.mentionTracking.shouldSend(
       mentionedUserId,
       authorUserId,
@@ -387,5 +429,17 @@ export class CommentsService {
     );
 
     await this.mentionTracking.recordSent(mentionedUserId, 'comment', filePath, threadId, commentId);
+  }
+
+  /**
+   * In-app inbox item for a comment event. Runs before the email anti-spam
+   * gates (cooldown, per-comment dedup) — those throttle email, not the inbox.
+   * Self / cross-personal suppression and dedup happen in the inbox service.
+   */
+  private async recordInboxItem(input: RecordInput): Promise<void> {
+    if (!this.inbox) return;
+    await this.inbox.record(input).catch((err) => {
+      this.logger.error(`Failed to record ${input.type} notification for ${input.recipientEmail}`, err);
+    });
   }
 }

@@ -310,6 +310,22 @@ export class LinkIndexService {
       }));
   }
 
+  /**
+   * Paths linked with `notePath` in either direction: resolved outgoing targets
+   * plus backlink sources. Not visibility-filtered — callers use it to flag
+   * paths they have already gated.
+   */
+  async getLinkedPaths(notePath: string): Promise<Set<string>> {
+    const [outgoing, incoming] = await Promise.all([
+      this.linkRepo.find({ where: { sourcePath: notePath } }),
+      this.linkRepo.find({ where: { targetPath: notePath } }),
+    ]);
+    const linked = new Set<string>();
+    for (const l of outgoing) if (l.targetPath) linked.add(l.targetPath);
+    for (const l of incoming) linked.add(l.sourcePath);
+    return linked;
+  }
+
   async getUnlinkedMentions(targetPath: string, userEmail?: string): Promise<UnlinkedMentionEntry[]> {
     // Derive title from filename
     const title = path.basename(targetPath, '.md');

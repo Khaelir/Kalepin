@@ -10,6 +10,7 @@ import {
 } from '../crypto/encryption-predicates';
 import { resolveJwtSecret } from '../auth/jwt-secret';
 import { DocHandlesService } from '../doc-handles/doc-handles.service';
+import { isTrashPath } from '../auth/visibility';
 
 const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
@@ -225,6 +226,8 @@ export class ShareLinksService {
     if (link.expiresAt !== null && Date.now() > link.expiresAt) {
       return { kind: 'gone', reason: 'expired' };
     }
+    // The link followed its note into the trash; it is dormant until restore.
+    if (isTrashPath(link.path)) return { kind: 'not_found' };
     return { kind: 'ok', path: link.path };
   }
 
@@ -251,6 +254,16 @@ export class ShareLinksService {
 
   async deleteByPath(path: string): Promise<void> {
     await this.repo.delete({ path });
+  }
+
+  /** Delete every row under `prefix + '/'` (folder purge). */
+  async deleteByPathPrefix(prefix: string): Promise<void> {
+    const items = await this.repo
+      .createQueryBuilder('s')
+      .where('substr(s.path, 1, length(:prefix)) = :prefix', { prefix: `${prefix}/` })
+      .getMany();
+    const under = items.filter((i) => i.path.startsWith(prefix + '/'));
+    if (under.length > 0) await this.repo.remove(under);
   }
 
   /** Look up a code's path even when revoked/expired. Used by the revoke

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { StarredItem } from '../entities/starred-item.entity';
+import { isTrashPath } from '../auth/visibility';
 
 @Injectable()
 export class StarsService {
@@ -9,8 +10,10 @@ export class StarsService {
     @InjectRepository(StarredItem) private readonly starRepo: Repository<StarredItem>,
   ) {}
 
+  /** A user's stars. Stars on trashed items are dormant and left out. */
   async listByUser(userId: number): Promise<StarredItem[]> {
-    return this.starRepo.find({ where: { userId }, order: { createdAt: 'ASC' } });
+    const rows = await this.starRepo.find({ where: { userId }, order: { createdAt: 'ASC' } });
+    return rows.filter((s) => !isTrashPath(s.path));
   }
 
   async addStar(userId: number, type: 'file' | 'folder', path: string): Promise<StarredItem> {

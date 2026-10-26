@@ -49,14 +49,19 @@ import { VaultHeader } from './components/Sidebar/VaultHeader';
 import { CreatePopover, type CreateKind } from './components/Sidebar/CreatePopover';
 import { StarredSection } from './components/Sidebar/StarredSection';
 import { RecentSection } from './components/Sidebar/RecentSection';
+import { TagsSection } from './components/Sidebar/TagsSection';
+import { tagSearchQuery } from './utils/frontmatter';
 import { SidebarSectionTitle } from './components/Sidebar/SidebarSectionTitle';
 import { Icon } from './components/Icon';
-import { recordVisit } from './utils/recent-files';
+import { recordVisit, getRecentFiles, removeRecent } from './utils/recent-files';
+import { TrashDialog } from './components/TrashDialog';
+import { isSelfOrUnder, displayName, deleteConfirmCopy, pathAfterRestore } from './utils/trash';
 import type { SaveStatus } from './editor/useSaveStatus';
 import * as api from './api';
 import type { UpdatesResponse, StarredItem, CompletedTour } from './api';
 import { useTour } from './tours/useTour';
 import { TUTORIAL_CONTENT } from './tours/essentials';
+import { browserTimeZone, isTodayNoteShortcut, localDateKey } from './templates';
 
 /** Runtime preferences persisted across sessions. Shape is owned by Phase 2+ of the redesign. */
 type TweakAccent = 'orange' | 'blue' | 'green' | 'purple' | 'rose';
@@ -191,6 +196,16 @@ export function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
+  // Tags: the search modal can open on `tag:<name>`; the sidebar refetches on note changes.
+  const [searchInitialQuery, setSearchInitialQuery] = useState('');
+  const [tagsRefreshKey, setTagsRefreshKey] = useState(0);
+  const openTagSearch = useCallback((tag: string) => {
+    setSearchInitialQuery(tagSearchQuery(tag));
+    setSearchOpen(true);
+  }, []);
+  useEffect(() => {
+    if (!searchOpen) setSearchInitialQuery('');
+  }, [searchOpen]);
   const [view, setView] = useState<'workspace' | 'settings' | 'changes' | 'graph'>('workspace');
   const [tweak, setTweak] = useState<Tweak>(loadInitialTweak);
   const [tweaksOpen, setTweaksOpen] = useState(false);
@@ -223,6 +238,7 @@ export function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [modal, setModal] = useState<{ title: string; placeholder?: string; defaultValue?: string; readOnly?: boolean; onConfirm: (v: string) => void } | null>(null);
   const [confirmModal, setConfirmModal] = useState<{ title: string; message: React.ReactNode; confirmLabel?: string; danger?: boolean; onConfirm: () => void } | null>(null);
+  const [trashOpen, setTrashOpen] = useState(false);
   const [createPicker, setCreatePicker] = useState<{ kind: CreateKind; anchor: HTMLElement } | null>(null);
   const [shareDialog, setShareDialog] = useState<{ path: string; isFolder: boolean; targetPaths?: string[] } | null>(null);
   // Set when the user navigates to a /d/<code>/... URL whose code resolves to
@@ -257,6 +273,8 @@ export function App() {
   const [highlightThreadId, setHighlightThreadId] = useState<string | null>(null);
   const isPopstateRef = useRef(false);
   const [updates, setUpdates] = useState<UpdatesResponse | null>(null);
+  // Bumped on `notifications:changed` / socket (re)connect; the bell re-fetches.
+  const [inboxRefreshKey, setInboxRefreshKey] = useState(0);
   const [stars, setStars] = useState<StarredItem[]>([]);
   const [completedTours, setCompletedTours] = useState<CompletedTour[]>([]);
   const [sharedEncrypted, setSharedEncrypted] = useState(false);
@@ -467,9 +485,34 @@ export function App() {
       followActiveDocAfterMove(msg.from, msg.to);
     });
 
+    // The open doc (or a folder above it) was moved to the trash. The server
+    // dropped the live session; close the editor so nothing types into it.
+    ws.on('doc:trashed', (msg: any) => {
+      const closed = closeActiveDocUnder(msg.docId);
+      if (!closed) return;
+      // This tab's own delete already shows a toast with Undo.
+      if ([...selfTrashedRef.current].some((p) => isSelfOrUnder(msg.docId, p))) return;
+      addToast(`“${displayName(msg.docId)}” was moved to trash`, 'info', {
+        actionLabel: 'Restore',
+        onAction: () => void restoreFromTrash(msg.trashItemId, msg.trashedPath ?? msg.docId, closed),
+      });
+    });
+
     ws.on('file:tree-update', () => {
       loadFileTree();
     });
+
+    // Any save, external edit or tree change may add or drop tags.
+    const bumpTags = () => setTagsRefreshKey((k) => k + 1);
+    ws.on('flushed', bumpTags);
+    ws.on('file:changed', bumpTags);
+    ws.on('file:tree-update', bumpTags);
+
+    // Notification inbox: the server nudges this user's sockets when an item
+    // is created or read; a (re)connect may have missed nudges.
+    const bumpInbox = () => setInboxRefreshKey((k) => k + 1);
+    ws.on('notifications:changed', bumpInbox);
+    ws.on('connected', bumpInbox);
 
     ws.on('presence:join', (msg: any) => {
       setPresenceUsers((prev) => {
@@ -843,6 +886,76 @@ export function App() {
     if (next) void openFile(next, undefined, { replaceHistory: true });
   }, [openFile]);
 
+  // Notification inbox item → its note, scrolled to the thread or heading
+  // (same path as a search-modal comment hit).
+  const openNotification = useCallback((item: api.InboxNotification) => {
+    setView('workspace');
+    if (item.threadId) {
+      pendingThreadIdRef.current = item.threadId;
+      setRailTab('comments');
+    }
+    void openFile(item.path, item.heading ?? undefined);
+  }, [openFile]);
+
+  // ── Trash ──
+  // Paths this tab just sent to the trash, so the `doc:trashed` echo for the
+  // open doc doesn't add a second toast next to the Undo one.
+  const selfTrashedRef = useRef<Set<string>>(new Set());
+
+  /** Close the editor if the active doc is `removedPath` or under it; returns the doc that was open. */
+  const closeActiveDocUnder = useCallback((removedPath: string): string | null => {
+    const current = activeFileRef.current;
+    if (!current || !isSelfOrUnder(current, removedPath)) return null;
+    activeFileRef.current = null;
+    setActiveFile(null);
+    setDocState(null);
+    window.history.replaceState({}, '', '/');
+    return current;
+  }, []);
+
+  const restoreFromTrash = useCallback(async (trashItemId: string, originalPath: string, reopen: string | null) => {
+    try {
+      const result = await api.restoreTrashItem(trashItemId);
+      await loadFileTree();
+      api.getStars().then(setStars).catch(() => { /* non-fatal */ });
+      const renamed = result.path !== originalPath;
+      addToast(`${renamed ? 'Restored as' : 'Restored'} “${displayName(result.path)}”`, 'info');
+      if (reopen) void openFile(pathAfterRestore(reopen, originalPath, result.path));
+    } catch (err) {
+      addToast((err as Error).message || 'Failed to restore', 'error');
+    }
+  }, [addToast, loadFileTree, openFile]);
+
+  const moveEntryToTrash = useCallback(async (entry: FileEntry) => {
+    const active = activeFileRef.current;
+    const wasOpen = active && isSelfOrUnder(active, entry.path) ? active : null;
+    selfTrashedRef.current.add(entry.path);
+    window.setTimeout(() => selfTrashedRef.current.delete(entry.path), 10_000);
+    let trashItemId: string | null;
+    try {
+      ({ trashItemId } = await api.moveToTrash(entry.path, entry.type === 'directory' ? 'directory' : 'file'));
+    } catch (err) {
+      addToast((err as Error).message || 'Delete failed', 'error');
+      return;
+    }
+    closeActiveDocUnder(entry.path);
+    for (const r of getRecentFiles()) {
+      if (isSelfOrUnder(r.path, entry.path)) removeRecent(r.path);
+    }
+    setStars((prev) => prev.filter((s) => !isSelfOrUnder(s.path, entry.path)));
+    await loadFileTree();
+    const name = displayName(entry.path);
+    if (!trashItemId) {
+      addToast(`Deleted “${name}” permanently`, 'info');
+      return;
+    }
+    const itemId = trashItemId;
+    addToast(`Moved “${name}” to trash`, 'info', {
+      actionLabel: 'Undo',
+      onAction: () => void restoreFromTrash(itemId, entry.path, wasOpen),
+    });
+  }, [addToast, closeActiveDocUnder, loadFileTree, restoreFromTrash]);
+
   // Bind the create-item ref now that openFile is declared.
   createItemRef.current = async (kind: CreateKind, parentPath: string) => {
     try {
@@ -919,6 +1032,33 @@ export function App() {
     );
   }, [addToast, loadFileTree]);
   useEffect(() => { triggerPendingShareNudgeRef.current = triggerPendingShareNudge; }, [triggerPendingShareNudge]);
+
+  // Templates & daily notes. A named note opens directly; an unnamed one goes
+  // through rename mode like any new note.
+  const createFromTemplate = useCallback(async (parentPath: string, templatePath: string, name?: string) => {
+    try {
+      const { path } = await api.createNoteFromTemplate(parentPath, templatePath, name, browserTimeZone());
+      await loadFileTree();
+      await openFile(path);
+      if (!name) setRenameRequestKey((k) => k + 1);
+      await recordPendingShareNudge(parentPath, path);
+    } catch (err) {
+      addToast((err as Error).message || 'Failed to create note from template', 'error');
+    }
+  }, [loadFileTree, openFile, recordPendingShareNudge, addToast]);
+
+  const openTodayNote = useCallback(async () => {
+    if (!getToken()) return;
+    try {
+      const { path, created } = await api.openDailyNote(localDateKey(), browserTimeZone());
+      if (created) await loadFileTree();
+      if (activeFileRef.current !== path) await openFile(path);
+    } catch (err) {
+      addToast((err as Error).message || "Failed to open today's note", 'error');
+    }
+  }, [loadFileTree, openFile, addToast]);
+  const openTodayNoteRef = useRef(openTodayNote);
+  useEffect(() => { openTodayNoteRef.current = openTodayNote; }, [openTodayNote]);
 
   // Open file from URL on initial load (after auth)
   const initialOpenDone = useRef(false);
@@ -1094,6 +1234,16 @@ export function App() {
         lastShiftTime = 0;
         return;
       }
+      // ⌘⇧D / Ctrl+Shift+D: today's daily note. Works from the editor, not
+      // while a text field owns the keyboard.
+      if (isTodayNoteShortcut(e)) {
+        const target = e.target as HTMLElement | null;
+        if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+        e.preventDefault();
+        void openTodayNoteRef.current();
+        lastShiftTime = 0;
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'n') {
         // Don't intercept while a modal/contenteditable owns the keyboard
         const target = e.target as HTMLElement | null;
@@ -1167,8 +1317,14 @@ export function App() {
 
     const deleteAction = () => {
       if (!entry) return;
-      const deleteFn = entry.type === 'directory' ? api.deleteDirectory : api.deleteFile;
-      deleteFn(entry.path).then(loadFileTree);
+      setConfirmModal({
+        ...deleteConfirmCopy(entry),
+        danger: true,
+        onConfirm: () => {
+          setConfirmModal(null);
+          void moveEntryToTrash(entry);
+        },
+      });
     };
 
     const copyPathAction = () => {
@@ -1485,6 +1641,7 @@ export function App() {
         onOpenSearch={() => setSearchOpen(true)}
         canShare={!!activeFile}
         onShare={handleShare}
+        inbox={{ refreshKey: inboxRefreshKey, onOpen: openNotification }}
         completedTours={completedTours}
         onStartTour={(id) => { setView('workspace'); startTour(id); }}
         theme={theme}
@@ -1494,6 +1651,7 @@ export function App() {
         settingsActive={view === 'settings'}
         onOpenSettings={() => setView(view === 'settings' ? 'workspace' : 'settings')}
         onDownloadVault={() => api.downloadVaultZip().catch(() => addToast('Failed to download vault', 'error'))}
+        onTagClick={openTagSearch}
       />
 
       {/* Sidebar */}
@@ -1517,6 +1675,7 @@ export function App() {
             <div className="sidebar-sections">
               <StarredSection stars={stars} activePath={activeFile} onOpen={(p) => { setView('workspace'); openFile(p); }} />
               <RecentSection activePath={activeFile} onOpen={(p) => { setView('workspace'); openFile(p); }} />
+              <TagsSection refreshKey={`${tagsRefreshKey}:${activeFile ?? ''}`} onSelectTag={openTagSearch} />
             </div>
             {(() => {
               const handleRename = async (entry: FileEntry, newName: string) => {
@@ -1594,6 +1753,10 @@ export function App() {
                 </>
               );
             })()}
+            <button type="button" className="kp-node kp-trash-entry" onClick={() => setTrashOpen(true)}>
+              <Icon name="delete" size={16} className="kp-node-icon" />
+              <span className="kp-node-label">Trash</span>
+            </button>
           </>
         )}
       </aside>
@@ -1718,6 +1881,7 @@ export function App() {
                   focusThreadId={highlightThreadId}
                   minimapEnabled={tweak.minimap}
                   renameRequestKey={renameRequestKey}
+                  onTagClick={openTagSearch}
                 />
               </EditorErrorBoundary>
             ) : (
@@ -1789,6 +1953,10 @@ export function App() {
                   activeFile={activeFile}
                   onNavigate={(path) => openFile(path)}
                   onPopOutGraph={() => setView('graph')}
+                  revision={docRevision}
+                  onInsertLink={docState && docState.permission !== 'comment'
+                    ? (path) => editorRef.current?.appendWikilink(path) ?? false
+                    : undefined}
                 />
               )}
               {railTab === 'activity' && (
@@ -1973,6 +2141,30 @@ export function App() {
         />
       )}
 
+      {trashOpen && (
+        <TrashDialog
+          onClose={() => setTrashOpen(false)}
+          onToast={addToast}
+          onRestored={(item, result) => {
+            void loadFileTree();
+            api.getStars().then(setStars).catch(() => { /* non-fatal */ });
+            const label = `${result.path !== item.originalPath ? 'Restored as' : 'Restored'} “${displayName(result.path)}”`;
+            if (result.kind === 'file') {
+              addToast(label, 'info', {
+                actionLabel: 'Open',
+                onAction: () => {
+                  setTrashOpen(false);
+                  setView('workspace');
+                  void openFile(result.path);
+                },
+              });
+            } else {
+              addToast(label, 'info');
+            }
+          }}
+        />
+      )}
+
       {/* Search modal */}
       {searchOpen && (
         <SearchModal
@@ -1984,6 +2176,7 @@ export function App() {
             openFile(path, heading);
           }}
           onClose={() => setSearchOpen(false)}
+          initialQuery={searchInitialQuery}
         />
       )}
 
@@ -2022,6 +2215,14 @@ export function App() {
             setCreatePicker(null);
           }}
           onClose={() => setCreatePicker(null)}
+          onCreateFromTemplate={(folderPath, templatePath, name) => {
+            setCreatePicker(null);
+            void createFromTemplate(folderPath, templatePath, name);
+          }}
+          onOpenTodayNote={() => {
+            setCreatePicker(null);
+            void openTodayNote();
+          }}
         />
       )}
 

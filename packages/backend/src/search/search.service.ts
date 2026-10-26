@@ -17,6 +17,9 @@ import {
   EncryptionPredicates,
 } from '../crypto/encryption-predicates';
 import { OTService } from '../ot/ot.service';
+import { TagIndexService } from '../tags/tag-index.service';
+import { parseSearchQuery } from '../tags/tag-query';
+import { splitFrontmatter } from '../tags/tag-parser';
 import * as path from 'path';
 
 export interface SearchResult {
@@ -27,6 +30,8 @@ export interface SearchResult {
   type?: 'note' | 'comment';
   threadId?: string;
   commentAuthor?: string;
+  /** Set on results of a `tag:`-only query, which are ordered by recency instead of score. */
+  modifiedAt?: string;
 }
 
 interface VectorResult {
@@ -48,8 +53,10 @@ const EMBEDDING_INACTIVITY_MS = 45_000;
 const EMBEDDING_SAFETY_CAP_MS = 5 * 60_000;
 const SHUTDOWN_DRAIN_BUDGET_MS = 30_000;
 const HEAL_SWEEP_INTERVAL_MS = 10 * 60_000;
+const TAG_ONLY_RESULT_LIMIT = 100;
+const TAG_ONLY_EXCERPT_LENGTH = 160;
 
-interface CachedEmbedding {
+export interface CachedEmbedding {
   path: string;
   heading: string;
   chunkText: string;
@@ -66,6 +73,11 @@ export class SearchService implements OnModuleInit {
 
   // In-memory vector cache: all embeddings keyed by path (lazy-loaded on first search)
   private vectorCache: Map<string, CachedEmbedding[]> | null = null;
+
+  // Notified when a note's chunk embeddings are written or removed (path), or
+  // when the whole table is reset (null). RelatedNotesService keys its
+  // per-note mean-vector cache off this.
+  private noteEmbeddingsListeners: ((notePath: string | null) => void)[] = [];
 
   // Per-doc holding map for deferred embeddings — populated only while an OT
   // session is active. Latest content for a path replaces older content.
@@ -88,6 +100,8 @@ export class SearchService implements OnModuleInit {
     @Optional() private readonly visibility?: GrantAwareVisibility,
     @Optional() @Inject(forwardRef(() => OTService))
     private readonly otService?: OTService,
+    @Optional() @Inject(forwardRef(() => TagIndexService))
+    private readonly tagIndex?: TagIndexService,
   ) {}
 
   /** Returns the set of paths the user can see via active grants (or empty). */
@@ -318,7 +332,7 @@ export class SearchService implements OnModuleInit {
     return all.join(mode === 'AND' ? ' AND ' : ' OR ');
   }
 
-  private async executeFtsQuery(ftsQuery: string, userEmail?: string): Promise<SearchResult[]> {
+  private async executeFtsQuery(ftsQuery: string, userEmail?: string, pathFilter?: Set<string>): Promise<SearchResult[]> {
     const grants = await this.grantSet(userEmail);
     const grantClause = grants.size > 0
       ? ` OR path IN (${Array.from({ length: grants.size }, () => '?').join(',')})`
@@ -331,12 +345,15 @@ export class SearchService implements OnModuleInit {
       params.push(escapeLike(userEmail));
       for (const p of grants) params.push(p);
     }
+    const tagClause = pathFilter ? 'AND path IN (SELECT value FROM json_each(?))' : '';
+    if (pathFilter) params.push(JSON.stringify([...pathFilter]));
 
     const results = await this.dataSource.query(
       `SELECT path, snippet(notes_fts, 2, '<mark>', '</mark>', '...', 32) as snippet, bm25(notes_fts, 5.0, 10.0, 1.0) as score
        FROM notes_fts
        WHERE notes_fts MATCH ?
        ${visibilityClause}
+       ${tagClause}
        ORDER BY bm25(notes_fts, 5.0, 10.0, 1.0)
        LIMIT 50`,
       params,
@@ -349,19 +366,19 @@ export class SearchService implements OnModuleInit {
     }));
   }
 
-  private async ftsSearch(query: string, userEmail?: string): Promise<SearchResult[]> {
+  private async ftsSearch(query: string, userEmail?: string, pathFilter?: Set<string>): Promise<SearchResult[]> {
     // Try AND-mode first (higher precision)
     const andQuery = this.buildFtsQuery(query, 'AND');
     if (!andQuery) return [];
 
     this.logger.debug(`FTS AND query: "${andQuery}"`);
-    let results = await this.executeFtsQuery(andQuery, userEmail);
+    let results = await this.executeFtsQuery(andQuery, userEmail, pathFilter);
 
     // Fall back to OR if AND returns < 3 results
     if (results.length < 3) {
       const orQuery = this.buildFtsQuery(query, 'OR');
       this.logger.debug(`FTS OR fallback: "${orQuery}"`);
-      const orResults = await this.executeFtsQuery(orQuery, userEmail);
+      const orResults = await this.executeFtsQuery(orQuery, userEmail, pathFilter);
       if (orResults.length > results.length) {
         results = orResults;
       }
@@ -374,11 +391,13 @@ export class SearchService implements OnModuleInit {
     return results;
   }
 
-  private async commentFtsSearch(query: string, userEmail?: string): Promise<SearchResult[]> {
+  private async commentFtsSearch(query: string, userEmail?: string, pathFilter?: Set<string>): Promise<SearchResult[]> {
+    // Double embedded quotes: a quoted query term such as `"tag:x"` would
+    // otherwise end the FTS5 string early and parse `tag:` as a column filter.
     const ftsQuery = query
       .split(/\s+/)
       .filter(Boolean)
-      .map((term) => `"${term}"*`)
+      .map((term) => `"${term.replace(/"/g, '""')}"*`)
       .join(' OR ');
 
     if (!ftsQuery) return [];
@@ -395,12 +414,15 @@ export class SearchService implements OnModuleInit {
       params.push(escapeLike(userEmail));
       for (const p of grants) params.push(p);
     }
+    const tagClause = pathFilter ? 'AND path IN (SELECT value FROM json_each(?))' : '';
+    if (pathFilter) params.push(JSON.stringify([...pathFilter]));
 
     const results = await this.dataSource.query(
       `SELECT path, thread_id, snippet(comments_fts, 2, '<mark>', '</mark>', '...', 32) as snippet
        FROM comments_fts
        WHERE comments_fts MATCH ?
        ${visibilityClause}
+       ${tagClause}
        ORDER BY rank
        LIMIT 50`,
       params,
@@ -710,6 +732,7 @@ export class SearchService implements OnModuleInit {
       const commentEntries = existing.filter((e) => e.source === 'comment');
       this.vectorCache.set(notePath, [...commentEntries, ...cachedEntries]);
     }
+    this.notifyNoteEmbeddingsChanged(notePath);
   }
 
   async removeNoteEmbeddings(notePath: string): Promise<void> {
@@ -726,6 +749,22 @@ export class SearchService implements OnModuleInit {
         this.vectorCache.set(notePath, commentEntries);
       } else {
         this.vectorCache.delete(notePath);
+      }
+    }
+    this.notifyNoteEmbeddingsChanged(notePath);
+  }
+
+  /** Subscribe to note-embedding writes/removals (`null` = everything was reset). */
+  onNoteEmbeddingsChanged(listener: (notePath: string | null) => void): void {
+    this.noteEmbeddingsListeners.push(listener);
+  }
+
+  private notifyNoteEmbeddingsChanged(notePath: string | null): void {
+    for (const listener of this.noteEmbeddingsListeners) {
+      try {
+        listener(notePath);
+      } catch (err) {
+        this.logger.warn(`note-embeddings listener failed: ${(err as Error).message}`);
       }
     }
   }
@@ -850,9 +889,14 @@ export class SearchService implements OnModuleInit {
     return this.vectorCache;
   }
 
+  /** Read-only view of the chunk cache (note and comment chunks, keyed by path). */
+  async getNoteChunkVectors(): Promise<ReadonlyMap<string, readonly CachedEmbedding[]>> {
+    return this.ensureVectorCache();
+  }
+
   // --- Vector Search ---
 
-  async vectorSearch(query: string, limit: number, userEmail?: string): Promise<VectorResult[]> {
+  async vectorSearch(query: string, limit: number, userEmail?: string, pathFilter?: Set<string>): Promise<VectorResult[]> {
     if (!this.embeddingService.ready) {
       this.logger.debug('Vector search skipped: embedding service not ready');
       return [];
@@ -874,6 +918,7 @@ export class SearchService implements OnModuleInit {
         // Predicate runs BEFORE the cosine compute — saves work and (more importantly)
         // never produces a score for a non-visible chunk that could leak via tied ordering.
         if (userEmail && !isVisibleTo(entry.path, userEmail) && !grants.has(entry.path)) continue;
+        if (pathFilter && !pathFilter.has(entry.path)) continue;
         const score = cosineSimilarity(queryEmbedding, entry.embedding);
         scored.push({ path: entry.path, heading: entry.heading, chunkText: entry.chunkText, score, source: entry.source });
       }
@@ -915,13 +960,29 @@ export class SearchService implements OnModuleInit {
     this.logger.log(`Search: "${query}"`);
     const t0 = Date.now();
 
+    // `tag:` tokens restrict the search to tagged notes; the rest is the text query.
+    const { text, tags } = this.tagIndex ? parseSearchQuery(query) : { text: query, tags: [] };
+    let pathFilter: Set<string> | undefined;
+    if (tags.length > 0) {
+      if (!text) {
+        const tagged = await this.tagOnlySearch(tags, userEmail);
+        this.trackSearchStats(query, tagged, source);
+        return tagged;
+      }
+      pathFilter = await this.tagIndex!.pathsWithAllTags(tags);
+      if (pathFilter.size === 0) {
+        this.trackSearchStats(query, [], source);
+        return [];
+      }
+    }
+
     const [ftsResults, commentFtsResults] = await Promise.all([
-      this.ftsSearch(query, userEmail),
-      this.commentFtsSearch(query, userEmail),
+      this.ftsSearch(text, userEmail, pathFilter),
+      this.commentFtsSearch(text, userEmail, pathFilter),
     ]);
 
     // Skip vector search for very short queries (FTS prefix matching is better)
-    const skipVector = query.trim().length < MIN_VECTOR_QUERY_LENGTH;
+    const skipVector = text.trim().length < MIN_VECTOR_QUERY_LENGTH;
 
     let merged: SearchResult[];
 
@@ -937,7 +998,7 @@ export class SearchService implements OnModuleInit {
     } else {
       let vectorResults: VectorResult[];
       try {
-        vectorResults = await this.vectorSearch(query, 50, userEmail);
+        vectorResults = await this.vectorSearch(text, 50, userEmail, pathFilter);
       } catch (err) {
         this.logger.error(`Vector search failed, falling back to FTS-only`, (err as Error).stack);
         const mtimes = await this.collectMtimes(ftsResults, commentFtsResults, []);
@@ -955,6 +1016,26 @@ export class SearchService implements OnModuleInit {
 
     this.trackSearchStats(query, merged, source);
     return merged;
+  }
+
+  /**
+   * A query made only of `tag:` tokens: the visible tagged notes, most
+   * recently modified first, each with the start of its body as snippet.
+   */
+  private async tagOnlySearch(tags: string[], userEmail?: string): Promise<SearchResult[]> {
+    const notes = (await this.tagIndex!.notesForTags(tags, userEmail)).slice(0, TAG_ONLY_RESULT_LIMIT);
+    if (notes.length === 0) return [];
+    const rows: { path: string; content: string }[] = await this.dataSource.query(
+      `SELECT path, content FROM notes_fts WHERE path IN (SELECT value FROM json_each(?))`,
+      [JSON.stringify(notes.map((n) => n.path))],
+    );
+    const excerpts = new Map(rows.map((r) => [r.path, bodyExcerpt(r.content)]));
+    return notes.map((n) => ({
+      path: n.path,
+      snippet: excerpts.get(n.path) ?? '',
+      score: 1,
+      ...(n.modifiedAt ? { modifiedAt: n.modifiedAt } : {}),
+    }));
   }
 
   getVectorCacheStats(): { loaded: boolean; chunkCount: number; estimatedSizeBytes: number } {
@@ -1126,6 +1207,10 @@ export class SearchService implements OnModuleInit {
     await this.dataSource.query(`DELETE FROM comments_fts`);
     await this.dataSource.query(`DELETE FROM note_embeddings`);
     await this.dataSource.query(`DELETE FROM notes_fts_meta`);
+    // The cache is only ever patched per path, so entries for notes deleted
+    // since the last index would otherwise outlive the reindex.
+    this.vectorCache = null;
+    this.notifyNoteEmbeddingsChanged(null);
     const files = await this.collectMarkdownFiles('');
 
     for (const filePath of files) {
@@ -1208,6 +1293,12 @@ export class SearchService implements OnModuleInit {
     if (match) return match[1].trim();
     return path.basename(filePath, '.md');
   }
+}
+
+/** Start of a note body (frontmatter stripped, whitespace collapsed) for tag-only results. */
+function bodyExcerpt(content: string): string {
+  const text = splitFrontmatter(content).body.replace(/\s+/g, ' ').trim();
+  return text.length > TAG_ONLY_EXCERPT_LENGTH ? `${text.slice(0, TAG_ONLY_EXCERPT_LENGTH)}…` : text;
 }
 
 function cosineSimilarity(a: Float32Array, b: Float32Array): number {

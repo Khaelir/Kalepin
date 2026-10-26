@@ -1,9 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { extractDocMentions, extractDocMentionsWithLines } from './extract-doc-mentions';
 import { findNearestHeading } from './find-nearest-heading';
 import { MentionTrackingService } from './mention-tracking.service';
 import { NotificationService } from './notification.service';
 import { StarsService } from '../stars/stars.service';
+import { NotificationInboxService } from '../notifications/notification-inbox.service';
 
 @Injectable()
 export class DocMentionService {
@@ -13,6 +14,7 @@ export class DocMentionService {
     private readonly mentionTracking: MentionTrackingService,
     private readonly notificationService: NotificationService,
     private readonly starsService: StarsService,
+    @Optional() private readonly inbox?: NotificationInboxService,
   ) {}
 
   /**
@@ -39,6 +41,7 @@ export class DocMentionService {
       return;
     }
 
+    const lines = newContent.split('\n');
     for (const mention of newOnly) {
       const mentionedUserId = await this.notificationService.resolveUserId(mention.email);
       if (!mentionedUserId) continue;
@@ -48,6 +51,21 @@ export class DocMentionService {
         this.logger.error(`Failed to auto-star ${docPath} for user ${mentionedUserId}`, err);
       });
 
+      const headingSlug = findNearestHeading(newContent, mention.line);
+
+      // In-app item first: the email gates below (cooldown, once per doc
+      // ever) throttle email only.
+      await this.inbox?.record({
+        type: 'doc_mention',
+        recipientEmail: mention.email,
+        actorEmail: authorEmail,
+        path: docPath,
+        heading: headingSlug ?? null,
+        snippet: lines[mention.line],
+      }).catch((err) => {
+        this.logger.error(`Failed to record doc mention notification for ${mention.email}`, err);
+      });
+
       const approved = await this.mentionTracking.shouldSend(
         mentionedUserId,
         authorUserId,
@@ -55,8 +73,6 @@ export class DocMentionService {
         docPath,
       );
       if (!approved) continue;
-
-      const headingSlug = findNearestHeading(newContent, mention.line);
 
       await this.notificationService.notifyDocMention(
         mention.email,

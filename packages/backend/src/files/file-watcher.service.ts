@@ -6,6 +6,8 @@ export type FileChangeCallback = (event: FileChangeEvent) => void;
 export type InternalWriteCallback = (path: string, content: string) => void | Promise<void>;
 
 const DEDUP_TTL_MS = 1000;
+/** Must outlast chokidar latency + the rename-tracking 500ms unlink window. */
+const SELF_CAUSED_TTL_MS = 10_000;
 
 @Injectable()
 export class FileWatcherService implements OnModuleInit {
@@ -21,6 +23,17 @@ export class FileWatcherService implements OnModuleInit {
    * follow-up external write to the same path within the window).
    */
   private dedupMap = new Map<string, { mtime: number; expiresAt: number }>();
+  /**
+   * Paths (files or folder roots) Kalepin itself just changed on disk, so
+   * rename tracking can tell them from changes made by another program.
+   * `removed`: trashed, permanently deleted, or put back by a trash restore —
+   * rename tracking ignores their events. `moved`: the source of
+   * `FilesService.move` — still correlated (stars and history follow the
+   * rename) but an unpaired unlink is not an external delete. Unlike
+   * `dedupMap` this never suppresses events: search and the link index still
+   * see the unlink.
+   */
+  private selfCaused = new Map<string, { kind: 'removed' | 'moved'; expiresAt: number }>();
 
   constructor(@Inject(STORAGE_ADAPTER) private readonly storage: StorageAdapter) {}
 
@@ -92,6 +105,51 @@ export class FileWatcherService implements OnModuleInit {
     for (const [path, entry] of this.dedupMap) {
       if (entry.expiresAt < now) this.dedupMap.delete(path);
     }
+    for (const [path, entry] of this.selfCaused) {
+      if (entry.expiresAt < now) this.selfCaused.delete(path);
+    }
+  }
+
+  /**
+   * Record that Kalepin is about to remove `virtualPath` (a file, or a folder
+   * and everything under it), or to put it back from the trash. Call before
+   * the storage operation so the chokidar event can't arrive first.
+   */
+  markSelfRemoved(virtualPath: string): void {
+    this.markSelfCaused(virtualPath, 'removed');
+  }
+
+  /** Record that `FilesService.move` is about to move `virtualPath` away. */
+  markSelfMoved(virtualPath: string): void {
+    this.markSelfCaused(virtualPath, 'moved');
+  }
+
+  /** True when `virtualPath`, or a folder containing it, was marked removed. */
+  isSelfRemoved(virtualPath: string): boolean {
+    return this.selfCausedKind(virtualPath) === 'removed';
+  }
+
+  /** True when `virtualPath`, or a folder containing it, was marked at all. */
+  isSelfCaused(virtualPath: string): boolean {
+    return this.selfCausedKind(virtualPath) !== null;
+  }
+
+  private markSelfCaused(virtualPath: string, kind: 'removed' | 'moved'): void {
+    this.pruneExpired();
+    this.selfCaused.set(virtualPath, { kind, expiresAt: Date.now() + SELF_CAUSED_TTL_MS });
+  }
+
+  private selfCausedKind(virtualPath: string): 'removed' | 'moved' | null {
+    const now = Date.now();
+    let found: 'removed' | 'moved' | null = null;
+    for (const [path, entry] of this.selfCaused) {
+      if (entry.expiresAt < now) continue;
+      if (virtualPath === path || virtualPath.startsWith(path + '/')) {
+        if (entry.kind === 'removed') return 'removed';
+        found = 'moved';
+      }
+    }
+    return found;
   }
 
   private async dispatchChokidar(

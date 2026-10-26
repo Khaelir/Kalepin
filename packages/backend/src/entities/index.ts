@@ -27,3 +27,8 @@ export { NoteAccessLog } from './note-access-log.entity';
 export type { AccessLogAction } from './note-access-log.entity';
 export { SsoLoginRequest } from './sso-login-request.entity';
 export { UserIdentity } from './user-identity.entity';
+export { NoteTag } from './note-tag.entity';
+export { InboxNotification } from './inbox-notification.entity';
+export type { InboxNotificationType } from './inbox-notification.entity';
+export { TrashItem } from './trash-item.entity';
+export type { TrashItemKind, TrashZone } from './trash-item.entity';

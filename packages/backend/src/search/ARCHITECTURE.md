@@ -58,6 +58,14 @@ Search is **brute-force**: load all embeddings, compute cosine similarity in JS,
 
 **Upgrade path at ~2,500+ notes:** Replace brute-force with [sqlite-vec](https://github.com/asg017/sqlite-vec) ANN index. The data model doesn't change — just the query mechanism.
 
+## Related Notes
+
+`related-notes.service.ts` answers "which notes are about the same thing as this one?" (`GET /api/search/related`, MCP `related_notes`).
+
+- A note's vector is the L2-normalised mean of its note-chunk embeddings (comment chunks excluded); related notes are ranked by the dot product of mean vectors, floor **0.88** (`RELATED_NOTES_MIN_SCORE`), top 5 by default (max 20). e5 passage similarities sit in a narrow band — see `openspec/changes/add-related-notes/design.md` for the calibration.
+- Mean vectors are cached per path, built from the in-memory chunk cache and invalidated through `SearchService.onNoteEmbeddingsChanged` (fired by `embedNow`, `removeNoteEmbeddings`, `reindexAll`). A request is one pass over notes.
+- Candidates pass the same visibility predicate as `vectorSearch` before scoring; `_secure/`, `_attachments/` and dot-folders are never returned. Each result carries the best-matching chunk pair as its "why" and a `linked` flag from the link index.
+
 ## Graceful Degradation
 
 - If the ONNX model fails to load → `embeddingService.ready === false` → search returns FTS5-only results

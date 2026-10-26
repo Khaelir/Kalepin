@@ -4,7 +4,7 @@ import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import { Breadcrumb } from './Breadcrumb';
 import { InlineTags } from './InlineTags';
 import { PresenceStack } from './PresenceStack';
-import { ActionCluster } from './ActionCluster';
+import { ActionCluster, type InboxProps } from './ActionCluster';
 
 interface PresenceUser {
   userId: string;
@@ -23,6 +23,7 @@ interface Props {
   onOpenSearch: () => void;
   canShare: boolean;
   onShare: () => void;
+  inbox: InboxProps;
   completedTours: CompletedTour[];
   onStartTour: (tourId: string) => void;
   theme: 'light' | 'dark';
@@ -32,6 +33,8 @@ interface Props {
   settingsActive: boolean;
   onOpenSettings: () => void;
   onDownloadVault: () => void;
+  /** Opens the search modal on `tag:<tag>`. */
+  onTagClick?: (tag: string) => void;
 }
 
 export function TopBar(props: Props) {
@@ -42,7 +45,7 @@ export function TopBar(props: Props) {
       {props.activeFile && (
         <>
           <Breadcrumb path={props.activeFile} />
-          <InlineTags content={props.docContent} />
+          <InlineTags content={props.docContent} onTagClick={props.onTagClick} />
         </>
       )}
 
@@ -57,6 +60,7 @@ export function TopBar(props: Props) {
         onOpenSearch={props.onOpenSearch}
         canShare={props.canShare}
         onShare={props.onShare}
+        inbox={props.inbox}
         completedTours={props.completedTours}
         onStartTour={props.onStartTour}
         theme={props.theme}

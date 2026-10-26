@@ -287,12 +287,16 @@ test.describe('Encrypted Folder lifecycle (single browser)', () => {
     const note = page.locator('.file-tree-node').filter({ hasText: 'Untitled note' }).first();
     await note.click({ button: 'right' });
     const deleteItem = page.locator('.context-menu .context-menu-item').filter({ hasText: /^Delete$/ }).first();
+    await deleteItem.click();
+    // _secure/ notes skip the trash, so the confirmation says so.
+    const confirm = page.getByRole('dialog', { name: 'Delete permanently?' });
+    await expect(confirm).toBeVisible();
     const [delRes] = await Promise.all([
       page.waitForResponse(
         (r) => r.url().includes('/api/files/delete') && r.request().method() === 'DELETE',
         { timeout: 15_000 },
       ),
-      deleteItem.click(),
+      confirm.getByRole('button', { name: 'Delete permanently' }).click(),
     ]);
     expect(delRes.status()).toBe(200);
     // After delete, exactly one of the two test-created "Untitled note" entries

@@ -12,6 +12,9 @@ class StubFileWatcher {
   onFileChange(cb: (event: FileChangeEvent) => void) {
     this.cb = cb;
   }
+  onPersonalChange() {}
+  isSelfRemoved() { return false; }
+  isSelfCaused() { return false; }
 }
 
 let ds: DataSource;

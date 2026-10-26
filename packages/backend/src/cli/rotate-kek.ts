@@ -28,6 +28,7 @@ import {
   hasEnvelopeMagic,
   WrongKEKError,
 } from '../crypto/envelope';
+import { skipSweepEntry } from '../encryption/sweep-entry-filter';
 
 interface Args {
   newKekFile: string;
@@ -64,7 +65,7 @@ function printHelp(): void {
   );
 }
 
-async function* walk(root: string): AsyncGenerator<string> {
+async function* walk(root: string, zone: 'personal' | 'shared'): AsyncGenerator<string> {
   const stack: string[] = [''];
   while (stack.length) {
     const rel = stack.pop()!;
@@ -76,7 +77,8 @@ async function* walk(root: string): AsyncGenerator<string> {
       continue;
     }
     for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
+      // Dot entries are skipped, except the zone trash (restorable notes).
+      if (skipSweepEntry(entry.name, entry.isDirectory(), rel, zone)) continue;
       if (entry.name.includes('.tmp.')) continue;
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
@@ -129,7 +131,7 @@ async function rotateRoot(
   let skipped = 0;
   let passthrough = 0;
 
-  for await (const rel of walk(zr.root)) {
+  for await (const rel of walk(zr.root, zr.zone)) {
     if (zr.skipUsersAtRoot && rel.startsWith('_users/')) continue;
     if (zr.skipUsersAtRoot && rel === '_users') continue;
     const abs = path.join(zr.root, rel);

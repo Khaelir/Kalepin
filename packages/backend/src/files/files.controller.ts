@@ -84,6 +84,12 @@ export class FilesController {
     let filePath: string;
     let handleIdResolved: string;
 
+    // Error responses (410 tombstone, 404, 423 PIN) must never be cached: a
+    // 410 is heuristically cacheable, and a trashed note can be restored, so a
+    // cached 410 would keep showing "no longer exists" for a live /doc/<id>.
+    // The success path below replaces this with its revalidating policy.
+    res.setHeader('Cache-Control', 'no-store');
+
     if (handleId) {
       // Resolve handle → path. Tombstoned handles surface a typed 410 so the
       // frontend can render the "this note no longer exists" card.
@@ -155,8 +161,9 @@ export class FilesController {
     @Req() req: Request & { user: JwtPayload },
   ) {
     await this.pinService.assertUnlockedForRequest(req, filePath, req.user.email);
-    await this.filesService.deleteFile(filePath, req.user.sub, req.user.email);
-    return { deleted: filePath };
+    const { trashItemId } = await this.filesService.deleteFile(filePath, req.user.sub, req.user.email);
+    // trashItemId is null for permanent deletes (`_secure/` paths).
+    return { deleted: filePath, trashItemId };
   }
 
   @Post('directory')
@@ -169,8 +176,8 @@ export class FilesController {
   @Delete('directory')
   @RequiredScope('notes:delete')
   async deleteDirectory(@Query('path') dirPath: string, @Req() req: { user: JwtPayload }) {
-    await this.filesService.deleteDirectory(dirPath, req.user.email);
-    return { deleted: dirPath };
+    const { trashItemId } = await this.filesService.deleteDirectory(dirPath, req.user.email, req.user.sub);
+    return { deleted: dirPath, trashItemId };
   }
 
   @Post('move')

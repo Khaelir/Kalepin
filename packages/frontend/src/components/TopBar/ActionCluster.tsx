@@ -1,7 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChangesBadge } from '../ChangesBadge';
 import { HelpDropdown } from '../HelpDropdown';
-import type { UpdatesResponse, CompletedTour } from '../../api';
+import { NotificationBell } from '../NotificationBell';
+import type { UpdatesResponse, CompletedTour, InboxNotification } from '../../api';
+
+export interface InboxProps {
+  /** Bumped when the server says the inbox changed. */
+  refreshKey: number;
+  onOpen: (item: InboxNotification) => void;
+}
 
 interface Props {
   // Changes badge
@@ -13,6 +20,8 @@ interface Props {
   // Share (copy current doc URL)
   canShare: boolean;
   onShare: () => void;
+  // Notification inbox
+  inbox: InboxProps;
   // Help tours
   completedTours: CompletedTour[];
   onStartTour: (tourId: string) => void;
@@ -33,6 +42,7 @@ export function ActionCluster({
   onOpenSearch,
   canShare,
   onShare,
+  inbox,
   completedTours,
   onStartTour,
   theme,
@@ -88,6 +98,8 @@ export function ActionCluster({
           <path d="M5.5 7l5-2.5M5.5 9l5 2.5" />
         </svg>
       </button>
+
+      <NotificationBell refreshKey={inbox.refreshKey} onOpen={inbox.onOpen} />
 
       <HelpDropdown completedTours={completedTours} onStartTour={onStartTour} />
 

@@ -222,6 +222,7 @@ test.describe('personal-folder leak-token property suite (Phase 4)', () => {
       if (m('/api/share-links')) return { body: { path: probeForeign } };
       if (m('/api/links/')) return { query: { path: probeForeign }, body: { path: probeForeign } };
       if (m('/api/updates')) return { query: { since: '0' } };
+      if (m('/api/search/related')) return { query: { path: probeForeign } };
       if (m('/api/search')) return { query: { q: BODYTOK } };
       if (m('/api/vault/items')) return { body: { path: probeForeign, type: 'file' } };
       return {};
@@ -440,6 +441,7 @@ test.describe('personal-folder leak-token property suite (Phase 4)', () => {
         case 'read_attachment': return { name: ALICE_ATTACHMENT, doc: probe };
         case 'list_files': return { path: ALICE_ROOT };
         case 'list_comments': return { path: probe };
+        case 'related_notes': return { path: probe };
         case 'create_note': return { path: 'Notes/leak-probe.md', content: '' };
         case 'patch_note': return { path: probe, oldText: BODYTOK, newText: '' };
         case 'append_to_note': return { path: probe, content: '' };

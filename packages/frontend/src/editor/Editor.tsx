@@ -45,6 +45,8 @@ import { getColorForUser } from '../utils/user-colors';
 import { useSaveStatus, SaveStatus } from './useSaveStatus';
 import { DrawioEditorController } from './drawio-editor-controller';
 import { DocHeader } from './DocHeader';
+import { flattenFiles } from './extensions/wikilink-utils';
+import { wikilinkTargetFor } from '../components/related-notes';
 
 // The built-in Link extension registers a clickHandler plugin that calls
 // window.open(link.href, link.target) during the mouseup event. Even with
@@ -366,6 +368,8 @@ export interface EditorHandle {
   navigateToComment: (quotedText?: string, positionHint?: { from: number; to: number }) => void;
   scrollToUser: (userId: string) => void;
   scrollToHeading: (id: string) => void;
+  /** Append a paragraph linking to `targetPath`; false when the note isn't editable. */
+  appendWikilink: (targetPath: string) => boolean;
 }
 
 /** Heading entry emitted via onHeadingsChange (consumed by the Outline panel). */
@@ -413,6 +417,8 @@ interface EditorProps {
   focusThreadId?: string | null;
   /** Show the floating mini-map rail + comment strip along the right edge. */
   minimapEnabled?: boolean;
+  /** DocHeader tag pills open the search modal on `tag:<tag>`. */
+  onTagClick?: (tag: string) => void;
 }
 
 export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function KalepinEditor({
@@ -445,6 +451,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
   renameRequestKey,
   focusThreadId = null,
   minimapEnabled = true,
+  onTagClick,
 }, ref) {
   const otClientRef = useRef<OTClient | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -936,6 +943,16 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       if (!containerRef.current) return;
       const el = containerRef.current.querySelector(`.tiptap [id="${CSS.escape(id)}"]`);
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+    appendWikilink(targetPath: string) {
+      if (!editor || !editor.isEditable) return false;
+      const { wikilink, paragraph } = editor.schema.nodes;
+      if (!wikilink || !paragraph) return false;
+      const target = wikilinkTargetFor(targetPath, activeFileRef.current, flattenFiles(filesRef.current));
+      const node = paragraph.create(null, wikilink.create({ target, alias: null }));
+      // A plain transaction: the OT bridge picks it up like any local edit.
+      editor.view.dispatch(editor.state.tr.insert(editor.state.doc.content.size, node));
+      return true;
     },
   }), [editor, navigateToComment, selectAndScroll]);
 
@@ -1503,6 +1520,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
                 onRename={onRename}
                 onRenameError={onRenameError}
                 renameRequestKey={renameRequestKey}
+                onTagClick={onTagClick}
               />
             )}
             <EditorContent editor={editor} className="editor-content" />

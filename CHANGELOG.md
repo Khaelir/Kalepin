@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Trash.** Deletes from the UI, the REST API and MCP `delete_note` move notes and folders to `.trash/` (vault) or `_users/{email}/.trash/` (personal) instead of removing them. An Undo toast follows every delete, confirmations say "Move to trash", and a Trash dialog in the sidebar restores or purges items. Restored notes keep their comments, share links, grants, stars, PIN and `/doc/` link. New `GET /api/trash`, `POST /api/trash/:id/restore`, `DELETE /api/trash/:id`, `DELETE /api/trash`; the delete endpoints return `trashItemId`. Notes in the Encrypted Folder are still deleted permanently.
+- **Tags.** A server-side tag index (frontmatter and inline `#tags`, nested and case-insensitive), a Tags tree in the sidebar, clickable tag pills, `tag:` filters in search, `GET /api/tags` and `GET /api/tags/notes`, and the MCP `list_tags` tool. Existing vaults are indexed on first boot.
+- **Related notes.** A "Related" section in the Backlinks panel lists semantically similar notes, why they match and whether they're linked yet, with a one-click "Link" action. Also `GET /api/search/related` and the MCP `related_notes` tool.
+- **Templates and daily notes.** "From template…" and "Today's note" in the create popover, ⌘⇧D / Ctrl+Shift+D for today's note, a sample-template action, `GET /api/templates`, `POST /api/daily-notes`, and `template` / `timezone` on `POST /api/vault/items`. MCP: `create_note` accepts `template` and `timezone` (`content` is now optional), and a new `daily_note` tool.
+- **Notification inbox.** A bell in the top bar with a live unread badge lists comment mentions, doc mentions, thread replies and "shared with you" events. Items follow notes through renames and moves and hide when you lose access. New `GET /api/notifications`, `GET /api/notifications/unread-count`, `POST /api/notifications/:id/read`, `POST /api/notifications/read-all`.
+- **Email notification preferences.** Settings → Email notifications: *All activity* / *Mentions and shares* / *None*. Every notification email has an unsubscribe link plus `List-Unsubscribe` headers (one-click supported). Sharing a note with a registered user now emails them (at most one email per sharer per minute).
+
+### Fixed
+
+- Renaming, deleting or purging a folder whose name contains `_` or `%` no longer touches the share links, grants, `/doc/` links, stars and history of look-alike paths (`my_notes` vs `my-notes`, or the personal folders of `john_doe@…` vs `john.doe@…`). These path matches treated `_` and `%` as SQL wildcards and ignored case; they now compare the exact prefix.
+- When an external editor saves a vault note atomically (delete, then re-create), Kalepin no longer deletes its share link, revokes its grants and breaks its `/doc/` link: the file-watcher cleanup now checks the note is really gone.
+- Deleting a folder now records a `deleted` change for each note inside it, and notes deleted on disk by other tools now show up in Changes and `get_updates`.
+- An open editor no longer re-creates a note that was deleted elsewhere.
+- Moving a folder in an encrypted zone now keeps the comment sidecars of nested notes, not just top-level ones.
+- Search no longer fails when a quoted term contains a colon.
+- A full search reindex now clears in-memory vectors of notes deleted since the last index.
+
+### Changed
+
+- The encryption sweep and `rotate-kek` now include trash folders, so trashed notes stay readable after a KEK rotation.
+
+### Configuration
+
+- New `TRASH_RETENTION_DAYS` (default `30`), `TEMPLATES_FOLDER` (default `Templates`), `DAILY_NOTES_FOLDER` (default `Journal`), `RELATED_NOTES_MIN_SCORE` (default `0.88`) and `NOTIFICATION_RETENTION_DAYS` (default `90`).
+
 ## 0.5.82 — 2026-10-26
 
 ### Added

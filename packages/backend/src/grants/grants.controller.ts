@@ -13,6 +13,8 @@ import {
   ForbiddenException,
   NotFoundException,
   Inject,
+  Logger,
+  Optional,
 } from '@nestjs/common';
 import { CombinedAuthGuard, JwtPayload, isAdmin } from '../auth';
 import { RequiredScope } from '../auth/required-scope.decorator';
@@ -24,6 +26,8 @@ import {
   EncryptionPredicates,
 } from '../crypto/encryption-predicates';
 import { canonicalizeEmail } from '../auth/email';
+import { NotificationInboxService } from '../notifications/notification-inbox.service';
+import { NotificationService } from '../comments/notification.service';
 
 interface MintBody {
   grantee_email: string;
@@ -35,11 +39,15 @@ interface MintBody {
 @Controller('api/grants')
 @UseGuards(CombinedAuthGuard)
 export class GrantsController {
+  private readonly logger = new Logger(GrantsController.name);
+
   constructor(
     private readonly grants: GrantsService,
     private readonly visibility: GrantAwareVisibility,
     @Inject(ENCRYPTION_PREDICATES)
     private readonly predicates: EncryptionPredicates,
+    @Optional() private readonly inbox?: NotificationInboxService,
+    @Optional() private readonly notifications?: NotificationService,
   ) {}
 
   @Post()
@@ -71,6 +79,12 @@ export class GrantsController {
       throw new ForbiddenException('Only the path owner can mint grants');
     }
 
+    // Only a grant that gives the grantee new access is "shared with you";
+    // changing the permission of an active grant stays silent.
+    const hadAccess = this.inbox || this.notifications
+      ? await this.grants.findActive(body.path, granteeEmail)
+      : null;
+
     const grant = await this.grants.mint({
       grantorEmail,
       granteeEmail,
@@ -78,7 +92,23 @@ export class GrantsController {
       permission: body.permission,
       expiresAt: body.expires_at ?? null,
     });
+    if (!hadAccess) await this.notifyShared(grantorEmail, granteeEmail, body.path);
     return { id: grant.id };
+  }
+
+  /** In-app item + email. Failures are logged: the grant itself succeeded. */
+  private async notifyShared(grantorEmail: string, granteeEmail: string, path: string): Promise<void> {
+    await this.inbox?.record({
+      type: 'share',
+      recipientEmail: granteeEmail,
+      actorEmail: grantorEmail,
+      path,
+    }).catch((err) => {
+      this.logger.error(`Failed to record share notification for ${granteeEmail}`, err);
+    });
+    this.notifications?.notifyShare(granteeEmail, grantorEmail, path).catch((err) => {
+      this.logger.error(`Failed to send share notification to ${granteeEmail}`, err);
+    });
   }
 
   @Patch(':id')

@@ -1,7 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FileEntry } from '@kalepin/shared';
 import { Icon } from '../Icon';
-import { ENCRYPTED_FOLDER_LABEL } from '../../crypto/path-predicates';
+import { ENCRYPTED_FOLDER_LABEL, isE2EEncrypted } from '../../crypto/path-predicates';
+import { createSampleTemplate, listTemplates, type TemplateInfo, type TemplateList } from '../../api';
+import { groupTemplates, todayNoteShortcutLabel } from '../../templates';
 
 export type CreateKind = 'note' | 'folder';
 
@@ -18,7 +20,13 @@ interface Props {
   anchorRef: React.RefObject<HTMLElement>;
   onConfirm: (folderPath: string) => void;
   onClose: () => void;
+  /** Note mode: create from a template in `folderPath`. Enables "From template…". */
+  onCreateFromTemplate?: (folderPath: string, templatePath: string, name: string | undefined) => void;
+  /** Note mode: open (creating if needed) today's daily note. */
+  onOpenTodayNote?: () => void;
 }
+
+type PopoverView = 'folders' | 'templates';
 
 interface FolderRow {
   path: string;
@@ -70,13 +78,30 @@ function flattenFolders(
   return out;
 }
 
-export function CreatePopover({ kind, files, defaultFolder, currentUserEmail, anchorRef, onConfirm, onClose }: Props) {
+export function CreatePopover({
+  kind,
+  files,
+  defaultFolder,
+  currentUserEmail,
+  anchorRef,
+  onConfirm,
+  onClose,
+  onCreateFromTemplate,
+  onOpenTodayNote,
+}: Props) {
   const [selected, setSelected] = useState<string>(defaultFolder);
   const [query, setQuery] = useState('');
   const [highlightIdx, setHighlightIdx] = useState(0);
+  const [view, setView] = useState<PopoverView>('folders');
+  const [templateList, setTemplateList] = useState<TemplateList | null>(null);
+  const [templatesError, setTemplatesError] = useState<string | null>(null);
+  const [creatingSample, setCreatingSample] = useState(false);
+  const [noteName, setNoteName] = useState('');
+  const [templateHi, setTemplateHi] = useState(0);
   const popRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
 
   // Anchor the popover under the trigger element.
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
@@ -89,9 +114,36 @@ export function CreatePopover({ kind, files, defaultFolder, currentUserEmail, an
     setPos({ top: r.bottom + 6, left });
   }, [anchorRef]);
 
+  // `positioned` is in the deps because nothing renders until the anchor is measured.
+  const positioned = pos !== null;
   useEffect(() => {
-    searchRef.current?.focus();
+    if (view === 'folders') searchRef.current?.focus();
+    else nameRef.current?.focus();
+  }, [view, positioned]);
+
+  // Templates are fetched when the template view opens, not for every create.
+  const loadTemplates = useCallback(async () => {
+    setTemplatesError(null);
+    try {
+      setTemplateList(await listTemplates());
+    } catch {
+      setTemplatesError("Couldn't load templates");
+    }
   }, []);
+
+  useEffect(() => {
+    if (view === 'templates') void loadTemplates();
+  }, [view, loadTemplates]);
+
+  const templateGroups = useMemo(() => groupTemplates(templateList?.templates ?? []), [templateList]);
+  const orderedTemplates = useMemo(
+    () => [...templateGroups.shared, ...templateGroups.personal],
+    [templateGroups],
+  );
+
+  useEffect(() => {
+    setTemplateHi((i) => Math.min(Math.max(0, i), Math.max(0, orderedTemplates.length - 1)));
+  }, [orderedTemplates.length]);
 
   // Build the list: vault root first, then all folders.
   const allRows = useMemo<FolderRow[]>(() => {
@@ -150,7 +202,143 @@ export function CreatePopover({ kind, files, defaultFolder, currentUserEmail, an
     }
   };
 
+  // The server cannot render into end-to-end encrypted folders.
+  const templatesBlocked = isE2EEncrypted(selected);
+  const showNoteActions = kind === 'note' && (!!onCreateFromTemplate || !!onOpenTodayNote);
+
+  const pickTemplate = (t: TemplateInfo) => {
+    onCreateFromTemplate?.(selected, t.path, noteName.trim() || undefined);
+  };
+
+  const handleTemplateKey = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setTemplateHi((i) => Math.min(orderedTemplates.length - 1, i + 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setTemplateHi((i) => Math.max(0, i - 1));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const target = orderedTemplates[templateHi];
+      if (target) pickTemplate(target);
+    }
+  };
+
+  const handleCreateSample = async () => {
+    setCreatingSample(true);
+    try {
+      await createSampleTemplate();
+      await loadTemplates();
+    } catch (err) {
+      setTemplatesError((err as Error).message || "Couldn't create the sample template");
+    } finally {
+      setCreatingSample(false);
+    }
+  };
+
   if (!pos) return null;
+
+  if (view === 'templates') {
+    const folderName = templateList?.folder ?? 'Templates';
+    const renderGroup = (label: string, items: TemplateInfo[], offset: number) => items.length > 0 && (
+      <div className="kp-template-group" role="group" aria-label={label}>
+        <div className="kp-template-group__label">{label}</div>
+        {items.map((t, j) => {
+          const i = offset + j;
+          return (
+            <button
+              key={t.path}
+              type="button"
+              className={`kp-create-popover__row kp-template-row${i === templateHi ? ' is-highlight' : ''}`}
+              title={t.path}
+              onClick={() => pickTemplate(t)}
+              onMouseEnter={() => setTemplateHi(i)}
+            >
+              <Icon name="description" size={14} />
+              <span className="kp-create-popover__row-label">{t.name}</span>
+            </button>
+          );
+        })}
+      </div>
+    );
+
+    return (
+      <>
+        <div className="kp-popover-overlay" onClick={onClose} />
+        <div
+          ref={popRef}
+          className="kp-create-popover"
+          style={{ top: pos.top, left: pos.left }}
+          role="dialog"
+          aria-label="New note from template"
+        >
+          <div className="kp-create-popover__head kp-template-head">
+            <button
+              type="button"
+              className="kp-template-back"
+              aria-label="Back to folders"
+              onClick={() => setView('folders')}
+            >
+              <Icon name="arrow_back" size={14} />
+            </button>
+            <span>New from template</span>
+          </div>
+          <button
+            type="button"
+            className="kp-create-popover__chip"
+            title="Change folder"
+            onClick={() => setView('folders')}
+          >
+            <Icon name={selectedRow?.path ? 'folder' : 'home'} size={14} />
+            <span>{selectedRow?.display ?? 'Vault root'}</span>
+          </button>
+          <div className="kp-create-popover__search">
+            <Icon name="edit" size={14} />
+            <input
+              ref={nameRef}
+              type="text"
+              className="kp-template-name"
+              placeholder="Note name (optional)"
+              aria-label="Note name"
+              value={noteName}
+              onChange={(e) => setNoteName(e.target.value)}
+              onKeyDown={handleTemplateKey}
+            />
+          </div>
+          <div className="kp-create-popover__list kp-template-list" onKeyDown={handleTemplateKey} tabIndex={-1}>
+            {templatesError ? (
+              <div className="kp-create-popover__empty">{templatesError}</div>
+            ) : !templateList ? (
+              <div className="kp-create-popover__empty">Loading templates…</div>
+            ) : orderedTemplates.length === 0 ? (
+              <div className="kp-template-empty">
+                <p>Add notes to a {folderName} folder to use them here.</p>
+                <button
+                  type="button"
+                  className="kp-template-empty__action"
+                  disabled={creatingSample}
+                  onClick={() => { void handleCreateSample(); }}
+                >
+                  <Icon name="note_add" size={14} />
+                  <span>{creatingSample ? 'Creating…' : 'Create a sample template'}</span>
+                </button>
+              </div>
+            ) : (
+              <>
+                {renderGroup('Shared', templateGroups.shared, 0)}
+                {renderGroup('Personal', templateGroups.personal, templateGroups.shared.length)}
+              </>
+            )}
+          </div>
+          <div className="kp-create-popover__foot">
+            <button type="button" className="kp-create-popover__cancel" onClick={onClose}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -212,6 +400,36 @@ export function CreatePopover({ kind, files, defaultFolder, currentUserEmail, an
             );
           })}
         </div>
+        {showNoteActions && (
+          <div className="kp-template-actions">
+            {onCreateFromTemplate && (
+              <button
+                type="button"
+                className="kp-template-action"
+                data-action="from-template"
+                disabled={templatesBlocked}
+                title={templatesBlocked ? `Templates aren't available in the ${ENCRYPTED_FOLDER_LABEL}` : 'Create the note from a template'}
+                onClick={() => { setTemplateHi(0); setView('templates'); }}
+              >
+                <Icon name="description" size={14} />
+                <span>From template…</span>
+              </button>
+            )}
+            {onOpenTodayNote && (
+              <button
+                type="button"
+                className="kp-template-action"
+                data-action="today-note"
+                title="Open today's daily note"
+                onClick={onOpenTodayNote}
+              >
+                <Icon name="today" size={14} />
+                <span>Today's note</span>
+                <kbd className="kp-kbd">{todayNoteShortcutLabel()}</kbd>
+              </button>
+            )}
+          </div>
+        )}
         <div className="kp-create-popover__foot">
           <button type="button" className="kp-create-popover__cancel" onClick={onClose}>
             Cancel

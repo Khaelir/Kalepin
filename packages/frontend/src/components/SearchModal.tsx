@@ -77,10 +77,12 @@ function bucketOf(modifiedAt: number, now: number): Bucket {
 interface SearchModalProps {
   onSelect: (path: string, heading?: string, threadId?: string) => void;
   onClose: () => void;
+  /** Prefills the input and runs the search right away (e.g. `tag:project` from a tag click). */
+  initialQuery?: string;
 }
 
-export function SearchModal({ onSelect, onClose }: SearchModalProps) {
-  const [query, setQuery] = useState('');
+export function SearchModal({ onSelect, onClose, initialQuery = '' }: SearchModalProps) {
+  const [query, setQuery] = useState(initialQuery);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [recentEdits, setRecentEdits] = useState<RecentlyEditedItem[]>([]);
   const [selected, setSelected] = useState(0);
@@ -93,7 +95,11 @@ export function SearchModal({ onSelect, onClose }: SearchModalProps) {
   const isEmpty = !query.trim();
 
   useEffect(() => {
-    inputRef.current?.focus();
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    // A prefilled query (tag click) leaves the caret at the end, ready to refine.
+    input.setSelectionRange(input.value.length, input.value.length);
   }, []);
 
   // Recently-edited fetch (once on mount; cheap, server limits to 200).
@@ -268,7 +274,7 @@ export function SearchModal({ onSelect, onClose }: SearchModalProps) {
             ref={inputRef}
             className="search-modal-input"
             type="text"
-            placeholder="Search your vault — content, titles, comments…"
+            placeholder="Search your vault — content, titles, comments, tag:name…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -372,7 +378,12 @@ export function SearchModal({ onSelect, onClose }: SearchModalProps) {
                           )}
                         </div>
                         <div className="search-modal-result-meta">
-                          {typeof r.score === 'number' && !Number.isNaN(r.score) && (
+                          {r.modifiedAt ? (
+                            // Tag-only results are ordered by recency, not relevance.
+                            <span className="search-modal-recent-time" title={new Date(r.modifiedAt).toLocaleString()}>
+                              {formatRelativeTime(new Date(r.modifiedAt).getTime())}
+                            </span>
+                          ) : typeof r.score === 'number' && !Number.isNaN(r.score) && (
                             <span className="search-modal-score" title="Relevance score">
                               {Math.round(Math.max(0, Math.min(r.score, 1)) * 100)}
                             </span>

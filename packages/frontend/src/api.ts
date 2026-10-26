@@ -685,7 +685,11 @@ export async function fetchHeadings(path: string): Promise<HeadingEntry[]> {
 
 // Search
 
-export interface SearchResult { path: string; snippet: string; score: number; heading?: string; type?: 'note' | 'comment'; threadId?: string; commentAuthor?: string }
+export interface SearchResult {
+  path: string; snippet: string; score: number; heading?: string; type?: 'note' | 'comment'; threadId?: string; commentAuthor?: string;
+  /** Set on results of a `tag:`-only query, which are ordered by recency instead of score. */
+  modifiedAt?: string;
+}
 
 export async function searchNotes(query: string): Promise<SearchResult[]> {
   const res = await fetch(`/api/files/search?q=${encodeURIComponent(query)}`, { headers: authHeaders() });
@@ -1366,4 +1370,305 @@ export async function fetchImageBlob(name: string, docPath?: string): Promise<st
   const url = URL.createObjectURL(blob);
   imageBlobCache.set(cacheKey, url);
   return url;
+}
+
+// Templates & daily notes
+
+export type TemplateScope = 'shared' | 'personal';
+
+export interface TemplateInfo {
+  /** Path relative to the templates folder, without `.md`. */
+  name: string;
+  path: string;
+  scope: TemplateScope;
+}
+
+export interface TemplateList {
+  /** Configured templates folder name (`Templates` by default). */
+  folder: string;
+  templates: TemplateInfo[];
+}
+
+export interface CreatedNoteResult {
+  path: string;
+  id: string | null;
+  created: boolean;
+}
+
+async function templateRequestError(res: Response, fallback: string): Promise<Error> {
+  if (res.status === 423) return new Error('This template is PIN-protected. Open it and unlock it first.');
+  const body = await res.json().catch(() => null);
+  return new Error(typeof body?.message === 'string' ? body.message : fallback);
+}
+
+export async function listTemplates(): Promise<TemplateList> {
+  const res = checkAuth(await fetch('/api/templates', { headers: authHeaders() }));
+  if (!res.ok) throw new Error('Failed to load templates');
+  return res.json();
+}
+
+/** Same endpoint as `createVaultItem`, with the template rendered server-side. */
+export async function createNoteFromTemplate(
+  parentPath: string,
+  template: string,
+  name: string | undefined,
+  timezone: string | undefined,
+): Promise<{ path: string }> {
+  const res = checkAuth(await fetch('/api/vault/items', {
+    method: 'POST',
+    headers: baseHeaders(),
+    body: JSON.stringify({ kind: 'note', parent_path: parentPath, name, template, timezone }),
+  }));
+  if (!res.ok) throw await templateRequestError(res, 'Failed to create note from template');
+  const out = (await res.json()) as { path: string };
+  markSelfSaved(out.path);
+  return out;
+}
+
+/** Today's (or any day's) daily note, created on first request. */
+export async function openDailyNote(date: string, timezone: string | undefined): Promise<CreatedNoteResult> {
+  const res = checkAuth(await fetch('/api/daily-notes', {
+    method: 'POST',
+    headers: baseHeaders(),
+    body: JSON.stringify({ date, timezone }),
+  }));
+  if (!res.ok) throw await templateRequestError(res, "Failed to open today's note");
+  const out = (await res.json()) as CreatedNoteResult;
+  if (out.created) markSelfSaved(out.path);
+  return out;
+}
+
+/** Create the shared `Templates/Meeting notes.md` sample unless it exists. */
+export async function createSampleTemplate(): Promise<CreatedNoteResult> {
+  const res = checkAuth(await fetch('/api/templates/sample', {
+    method: 'POST',
+    headers: baseHeaders(),
+  }));
+  if (!res.ok) throw await templateRequestError(res, 'Failed to create the sample template');
+  const out = (await res.json()) as CreatedNoteResult;
+  if (out.created) markSelfSaved(out.path);
+  return out;
+}
+
+// Related notes
+
+export interface RelatedNoteReason {
+  /** Best-matching section of the related note ('' before any heading). */
+  heading: string;
+  /** Best-matching section of the open note. */
+  sourceHeading: string;
+  excerpt: string;
+}
+
+export interface RelatedNote {
+  path: string;
+  title: string;
+  score: number;
+  /** True when either note already links to the other. */
+  linked: boolean;
+  /** Null when the related note is PIN-locked. */
+  reason: RelatedNoteReason | null;
+}
+
+export interface RelatedNotesResponse {
+  /** False when the server's semantic index (embedding model) isn't available. */
+  available: boolean;
+  items: RelatedNote[];
+}
+
+export async function fetchRelatedNotes(path: string, limit?: number): Promise<RelatedNotesResponse> {
+  const params = new URLSearchParams({ path });
+  if (limit !== undefined) params.set('limit', String(limit));
+  const res = checkAuth(await fetch(`/api/search/related?${params}`, {
+    headers: authHeaders(),
+    credentials: 'same-origin',
+  }));
+  if (!res.ok) throw new Error('Failed to fetch related notes');
+  return res.json();
+}
+
+// Tags
+
+export interface TagCount {
+  /** Display form; tags match case-insensitively. */
+  tag: string;
+  /** Visible notes carrying the tag or a nested child tag. */
+  count: number;
+}
+
+export interface TaggedNote {
+  path: string;
+  title: string;
+  modifiedAt: string | null;
+}
+
+export async function fetchTags(): Promise<TagCount[]> {
+  const res = checkAuth(await fetch('/api/tags', { headers: authHeaders() }));
+  if (!res.ok) throw new Error('Failed to fetch tags');
+  return res.json();
+}
+
+export async function fetchNotesForTag(tag: string): Promise<TaggedNote[]> {
+  const res = checkAuth(await fetch(`/api/tags/notes?tag=${encodeURIComponent(tag)}`, { headers: authHeaders() }));
+  if (!res.ok) throw new Error('Failed to fetch tagged notes');
+  return res.json();
+}
+
+// Notification inbox
+
+export type InboxNotificationType = 'comment_mention' | 'doc_mention' | 'thread_reply' | 'share';
+
+export interface InboxNotification {
+  id: number;
+  type: InboxNotificationType;
+  actorEmail: string;
+  actorName: string | null;
+  /** Current path of the note (follows renames). */
+  path: string;
+  threadId: string | null;
+  commentId: string | null;
+  /** Doc mentions: heading slug to scroll to. */
+  heading: string | null;
+  snippet: string | null;
+  createdAt: number;
+  readAt: number | null;
+  /** False when the note was deleted. */
+  available: boolean;
+}
+
+export interface InboxPage {
+  items: InboxNotification[];
+  nextBefore: number | null;
+}
+
+export type EmailNotificationPreference = 'all' | 'mentions' | 'none';
+
+export async function listNotifications(opts: { limit?: number; before?: number } = {}): Promise<InboxPage> {
+  const qs = new URLSearchParams();
+  if (opts.limit) qs.set('limit', String(opts.limit));
+  if (opts.before) qs.set('before', String(opts.before));
+  const query = qs.toString();
+  const res = checkAuth(await fetch(`/api/notifications${query ? `?${query}` : ''}`, {
+    headers: authHeaders(),
+  }));
+  if (!res.ok) throw new Error('Failed to load notifications');
+  return res.json();
+}
+
+export async function getUnreadNotificationCount(): Promise<number> {
+  const res = checkAuth(await fetch('/api/notifications/unread-count', { headers: authHeaders() }));
+  if (!res.ok) throw new Error('Failed to load unread count');
+  const data = await res.json();
+  return typeof data.count === 'number' ? data.count : 0;
+}
+
+export async function markNotificationRead(id: number): Promise<void> {
+  const res = checkAuth(await fetch(`/api/notifications/${id}/read`, {
+    method: 'POST',
+    headers: authHeaders(),
+  }));
+  if (!res.ok) throw new Error('Failed to mark notification read');
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  const res = checkAuth(await fetch('/api/notifications/read-all', {
+    method: 'POST',
+    headers: authHeaders(),
+  }));
+  if (!res.ok) throw new Error('Failed to mark notifications read');
+}
+
+export async function getEmailNotificationPreference(): Promise<EmailNotificationPreference> {
+  const res = checkAuth(await fetch('/api/notifications/preferences', { headers: authHeaders() }));
+  if (!res.ok) throw new Error('Failed to load email preference');
+  const data = await res.json();
+  return data.email as EmailNotificationPreference;
+}
+
+export async function setEmailNotificationPreference(email: EmailNotificationPreference): Promise<void> {
+  const res = checkAuth(await fetch('/api/notifications/preferences', {
+    method: 'PUT',
+    headers: baseHeaders(),
+    body: JSON.stringify({ email }),
+  }));
+  if (!res.ok) throw new Error('Failed to save email preference');
+}
+
+// ── Trash ──
+
+export interface TrashItem {
+  id: string;
+  /** Basename of the original path (`Plan.md`, `Drafts`). */
+  name: string;
+  originalPath: string;
+  /** Parent folder of the original path; '' for the vault root. */
+  originalFolder: string;
+  kind: 'file' | 'folder';
+  zone: 'shared' | 'personal';
+  deletedByEmail: string;
+  /** unix ms */
+  deletedAt: number;
+  /** Files inside the item (1 for a file). */
+  itemCount: number;
+  canPurge: boolean;
+}
+
+export interface TrashListing {
+  /** Days before automatic purge; 0 = never. */
+  retentionDays: number;
+  items: TrashItem[];
+}
+
+async function trashError(res: Response, fallback: string): Promise<Error> {
+  const body = await res.json().catch(() => null);
+  return new Error(typeof body?.message === 'string' ? body.message : fallback);
+}
+
+/** Delete a note or folder. `trashItemId` is null when the server deleted it
+ *  permanently (end-to-end encrypted paths skip the trash). */
+export async function moveToTrash(
+  path: string,
+  kind: 'file' | 'directory',
+): Promise<{ trashItemId: string | null }> {
+  const endpoint = kind === 'directory' ? 'directory' : 'delete';
+  const res = checkAuth(await fetch(`/api/files/${endpoint}?path=${encodeURIComponent(path)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  }));
+  if (!res.ok) throw await trashError(res, kind === 'directory' ? 'Failed to delete folder' : 'Failed to delete file');
+  const body = await res.json().catch(() => ({}));
+  return { trashItemId: typeof body?.trashItemId === 'string' ? body.trashItemId : null };
+}
+
+export async function listTrash(): Promise<TrashListing> {
+  const res = checkAuth(await fetch('/api/trash', { headers: authHeaders() }));
+  if (!res.ok) throw await trashError(res, 'Failed to load the trash');
+  return res.json();
+}
+
+/** Restore an item; resolves to the path it was restored at (it gets a
+ *  " (restored)" suffix when the original path is taken). */
+export async function restoreTrashItem(id: string): Promise<{ id: string; path: string; kind: 'file' | 'folder' }> {
+  const res = checkAuth(await fetch(`/api/trash/${encodeURIComponent(id)}/restore`, {
+    method: 'POST',
+    headers: authHeaders(),
+  }));
+  if (!res.ok) throw await trashError(res, 'Failed to restore');
+  return res.json();
+}
+
+export async function purgeTrashItem(id: string): Promise<void> {
+  const res = checkAuth(await fetch(`/api/trash/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  }));
+  if (!res.ok) throw await trashError(res, 'Failed to delete permanently');
+}
+
+/** Purge every item the caller may purge; resolves to how many were purged. */
+export async function emptyTrash(): Promise<number> {
+  const res = checkAuth(await fetch('/api/trash', { method: 'DELETE', headers: authHeaders() }));
+  if (!res.ok) throw await trashError(res, 'Failed to empty the trash');
+  const body = await res.json();
+  return typeof body?.purged === 'number' ? body.purged : 0;
 }

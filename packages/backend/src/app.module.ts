@@ -4,7 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'path';
-import { User, Session, MagicLinkToken, OTOperationHistory, ApiKey, NoteChange, StarredItem, NoteLink, NoteSnapshot, McpUsageLog, MentionNotification, DailyStats, FailedSearch, ShortLink, DocHandle, OAuthClient, OAuthAuthorizationRequest, OAuthAuthorizationCode, OAuthGrant, OAuthAccessToken, OAuthRefreshToken, EncryptionZone, NoteMeta, DocumentGrant, NoteAccessLog, SsoLoginRequest, UserIdentity } from './entities';
+import { User, Session, MagicLinkToken, OTOperationHistory, ApiKey, NoteChange, StarredItem, NoteLink, NoteSnapshot, McpUsageLog, MentionNotification, DailyStats, FailedSearch, ShortLink, DocHandle, OAuthClient, OAuthAuthorizationRequest, OAuthAuthorizationCode, OAuthGrant, OAuthAccessToken, OAuthRefreshToken, EncryptionZone, NoteMeta, DocumentGrant, NoteAccessLog, SsoLoginRequest, UserIdentity, NoteTag, InboxNotification, TrashItem } from './entities';
 import { StorageModule } from './storage';
 import { EncryptionModule } from './encryption/encryption.module';
 import { AuthModule, OAuthModule, SsoModule } from './auth';
@@ -22,12 +22,16 @@ import { PinModule } from './pin';
 import { GrantsModule } from './grants';
 import { AccessLogModule } from './access-log/access-log.module';
 import { LinksModule } from './links/links.module';
+import { TagsModule } from './tags/tags.module';
 import { BackupModule } from './backup/backup.module';
 import { ArchiveModule } from './archive/archive.module';
 import { StatsModule } from './stats/stats.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { TrashModule } from './trash/trash.module';
 import { ActiveUserInterceptor } from './stats/active-user.interceptor';
 import { HealthController } from './health.controller';
 import { TestDebugModule } from './__test/test-debug.module';
+import { TemplatesModule } from './templates';
 
 @Module({
   controllers: [HealthController],
@@ -38,7 +42,7 @@ import { TestDebugModule } from './__test/test-debug.module';
     TypeOrmModule.forRoot({
       type: 'better-sqlite3',
       database: process.env.DB_PATH || './data/kalepin.sqlite',
-      entities: [User, Session, MagicLinkToken, OTOperationHistory, ApiKey, NoteChange, StarredItem, NoteLink, NoteSnapshot, McpUsageLog, MentionNotification, DailyStats, FailedSearch, ShortLink, DocHandle, OAuthClient, OAuthAuthorizationRequest, OAuthAuthorizationCode, OAuthGrant, OAuthAccessToken, OAuthRefreshToken, EncryptionZone, NoteMeta, DocumentGrant, NoteAccessLog, SsoLoginRequest, UserIdentity],
+      entities: [User, Session, MagicLinkToken, OTOperationHistory, ApiKey, NoteChange, StarredItem, NoteLink, NoteSnapshot, McpUsageLog, MentionNotification, DailyStats, FailedSearch, ShortLink, DocHandle, OAuthClient, OAuthAuthorizationRequest, OAuthAuthorizationCode, OAuthGrant, OAuthAccessToken, OAuthRefreshToken, EncryptionZone, NoteMeta, DocumentGrant, NoteAccessLog, SsoLoginRequest, UserIdentity, NoteTag, InboxNotification, TrashItem],
       synchronize: true,
     }),
     // CORS for /drawio/ is handled by the Express middleware in main.ts
@@ -66,12 +70,16 @@ import { TestDebugModule } from './__test/test-debug.module';
     GrantsModule,
     AccessLogModule,
     LinksModule,
+    TagsModule,
     ArchiveModule,
     StatsModule,
+    NotificationsModule,
+    TrashModule,
     ...(process.env.S3_BACKUP_BUCKET ? [BackupModule] : []),
     // Phase 4 leak-token e2e harness: route + MCP-tool discovery + notification
     // counters. Loaded only when explicitly enabled.
     ...(process.env.EXPOSE_TEST_ENDPOINTS === '1' ? [TestDebugModule] : []),
+    TemplatesModule,
   ],
 })
 export class AppModule {}
