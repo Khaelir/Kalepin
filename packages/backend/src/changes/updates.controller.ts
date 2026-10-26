@@ -1,9 +1,11 @@
 import { Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import type { Request } from 'express';
 import { CombinedAuthGuard, JwtPayload } from '../auth';
 import { RequiredScope } from '../auth/required-scope.decorator';
 import { User, StarredItem } from '../entities';
+import { PinService } from '../pin/pin.service';
 import { ChangeTrackingService } from './change-tracking.service';
 
 @Controller('api/updates')
@@ -13,12 +15,13 @@ export class UpdatesController {
     private readonly changeTracking: ChangeTrackingService,
     @InjectRepository(User) private readonly userRepo: Repository<User>,
     @InjectRepository(StarredItem) private readonly starRepo: Repository<StarredItem>,
+    private readonly pinService: PinService,
   ) {}
 
   @Get()
   @RequiredScope('updates:read')
   async getUpdates(
-    @Req() req: { user: JwtPayload },
+    @Req() req: Request & { user: JwtPayload },
     @Query('since') sinceParam?: string,
   ) {
     const user = await this.userRepo.findOneBy({ id: req.user.sub });
@@ -36,7 +39,20 @@ export class UpdatesController {
     const starredRefs = stars.map((s) => ({ type: s.type, path: s.path }));
 
     // Exclude current user's own changes, split by starred, gate by visibility.
-    return this.changeTracking.getChangesSince(since, req.user.sub, starredRefs, req.user.email);
+    const updates = await this.changeTracking.getChangesSince(since, req.user.sub, starredRefs, req.user.email);
+
+    // Diffs are note content (a `created` diff is the whole note), so a
+    // PIN-locked note keeps its entry but loses its diffs unless this request
+    // carries the note's unlock credential. Same rule as MCP get_updates.
+    for (const group of [...updates.starred, ...updates.other]) {
+      for (const file of group.files) {
+        if (!(await this.pinService.isUnlockedForRequest(req, file.path, req.user.email))) {
+          file.diffs = file.diffs.map(() => null);
+          file.pinProtected = true;
+        }
+      }
+    }
+    return updates;
   }
 
   @Get('recently-edited')

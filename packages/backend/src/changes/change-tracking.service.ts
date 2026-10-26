@@ -22,6 +22,8 @@ interface FileChangeSummary {
   diffs: (string | null)[];
   /** True if any row in this group stored hashes/sizes only (E2E content). */
   metadataOnly: boolean;
+  /** Set by the REST feed when the note is PIN-locked for this request; diffs are nulled. */
+  pinProtected?: boolean;
 }
 
 interface FolderGroup {

@@ -304,6 +304,20 @@ export class PinService {
   }
 
   /**
+   * Boolean form of `assertUnlockedForRequest`, for endpoints that return many
+   * paths and redact the locked ones instead of failing the whole response.
+   */
+  async isUnlockedForRequest(
+    req: { headers: { cookie?: string; 'x-kalepin-unlock'?: string | string[] } },
+    path: string,
+    viewer: string,
+  ): Promise<boolean> {
+    const headerRaw = req.headers['x-kalepin-unlock'];
+    const headerToken = Array.isArray(headerRaw) ? headerRaw[0] : headerRaw;
+    return this.isUnlockedFor(path, viewer, req.headers.cookie, headerToken);
+  }
+
+  /**
    * WebSocket counterpart of `assertUnlockedForRequest`. Frames carry no
    * cookies, so the gateway passes the cookie header captured at the upgrade
    * plus an optional unlock token sent with the frame. True when the path has
