@@ -7,23 +7,27 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { DocHandle } from '../entities/doc-handle.entity';
 import { DocHandlesService } from '../doc-handles';
+import type { UpdatesResponse } from '../changes/change-tracking.service';
 import { McpService } from './mcp.service';
 
 const BOB = 'bob@example.com';
 const ALICE_NOTE = '_users/alice@example.com/diary.md';
 const ID_RE = /^[A-Z2-7]{16}$/;
 
-/** Personal folders are owner-only; everything else is shared. */
-function visibleTo(path: string, email: string): boolean {
-  return !path.startsWith('_users/') || path.startsWith(`_users/${email}/`);
-}
-
 let ds: DataSource;
 let docHandles: DocHandlesService;
 let service: McpService;
 let files: Map<string, string>;
 let pinned: Set<string>;
+let hidden: Set<string>;
+let updates: UpdatesResponse;
 let client: Client;
+
+/** Personal folders are owner-only; everything else is shared unless hidden. */
+function visibleTo(path: string, email: string): boolean {
+  if (hidden.has(path)) return false;
+  return !path.startsWith('_users/') || path.startsWith(`_users/${email}/`);
+}
 
 async function setup() {
   ds = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [DocHandle], synchronize: true });
@@ -31,6 +35,8 @@ async function setup() {
   docHandles = new DocHandlesService(ds.getRepository(DocHandle));
   files = new Map();
   pinned = new Set();
+  hidden = new Set();
+  updates = { period: { since: null, until: '' }, stats: { created: 0, modified: 0, deleted: 0 }, starred: [], other: [] };
 
   const assertReadableBy = async (path: string, email: string) => {
     if (!visibleTo(path, email)) throw new NotFoundException();
@@ -67,7 +73,7 @@ async function setup() {
     filesService as any,
     searchService as any,
     { getComments: async () => [] } as any,
-    null as any,
+    { getChangesSince: async () => updates } as any,
     { logToolCall: async () => {} } as any,
     null as any,
     null as any,
@@ -205,5 +211,52 @@ describe('MCP note ids', () => {
       `Notes/b.md\t${await docHandles.forPath('Notes/b.md')}`,
     ]);
     for (const line of lines) assert.match(line.split('\t')[1], ID_RE);
+  });
+
+  it('get_updates carries ids for live and deleted notes, without minting', async () => {
+    const liveId = await docHandles.findOrCreateForPath('Notes/live.md');
+    const goneId = await docHandles.findOrCreateForPath('Notes/gone.md');
+    await docHandles.tombstoneByPath('Notes/gone.md');
+    const change = (path: string, action: 'modified' | 'deleted') =>
+      ({ path, action, changes: 1, lastChangedAt: '', user: null, diffs: [], metadataOnly: false });
+    updates.other = [{
+      folder: 'Notes',
+      files: [change('Notes/live.md', 'modified'), change('Notes/gone.md', 'deleted'), change('Notes/renamed-since.md', 'modified')],
+    }];
+
+    const { other } = JSON.parse((await call('get_updates', {})).text);
+    const idByPath = Object.fromEntries(other[0].files.map((f: { path: string; id?: string }) => [f.path, f.id]));
+    assert.deepEqual(idByPath, { 'Notes/live.md': liveId, 'Notes/gone.md': goneId, 'Notes/renamed-since.md': undefined });
+    assert.equal(await docHandles.forPath('Notes/renamed-since.md'), null);
+  });
+});
+
+describe('MCP note:// resource', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('reads a note', async () => {
+    files.set('plan.md', 'roadmap');
+    const res = await client.readResource({ uri: 'note://plan.md' });
+    assert.equal((res.contents[0] as { text: string }).text, 'roadmap');
+  });
+
+  it('refuses a PIN-locked note without leaking its content', async () => {
+    files.set('secret.md', 'the code is 1234');
+    pinned.add('secret.md');
+    await assert.rejects(
+      () => client.readResource({ uri: 'note://secret.md' }),
+      (err: Error) => err.message.includes('pin-protected') && !err.message.includes('1234'),
+    );
+  });
+
+  it('checks visibility before the PIN, so a hidden lock is not revealed', async () => {
+    files.set('secret.md', 'x');
+    pinned.add('secret.md');
+    hidden.add('secret.md');
+    await assert.rejects(
+      () => client.readResource({ uri: 'note://secret.md' }),
+      (err: Error) => !err.message.includes('pin-protected'),
+    );
   });
 });

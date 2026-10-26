@@ -918,7 +918,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     server.registerTool(
       'get_updates',
       {
-        description: 'Get a summary of note changes since your last check. Returns stats and file list by default. Use include_diffs to get full unified diffs.',
+        description: 'Get a summary of note changes since your last check. Returns stats and file list by default. Use include_diffs to get full unified diffs. Each file carries the note\'s stable `id` when it has one, including deleted notes.',
         inputSchema: {
           since: z.string().optional().describe('Optional ISO 8601 datetime to get changes since (overrides last check time)'),
           include_diffs: z.boolean().optional().describe('Include unified diffs for each file change (default: false). Binary/diagram diffs are replaced with size placeholders.'),
@@ -928,6 +928,11 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       this.wrapTool('get_updates', user, async ({ since, include_diffs }) => {
         const sinceDate = since ? new Date(since) : null;
         const response = await this.changeTracking.getChangesSince(sinceDate, user.sub, [], user.email.toLowerCase());
+        // Look up without minting: change entries are historical, and a path
+        // renamed or deleted since must not get a fresh id pointing at nothing.
+        const ids = await this.docHandles.forPaths(
+          [...response.starred, ...response.other].flatMap((g) => g.files.map((f) => f.path)),
+        );
 
         // Shape MCP response: strip or filter diffs, and replace PIN-locked
         // entries with a sentinel so diffs do not leak content past the gate.
@@ -935,16 +940,18 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           Promise.all(folders.map(async (g) => ({
             ...g,
             files: await Promise.all(g.files.map(async (f) => {
+              const id = ids.get(f.path);
               if (await this.pinReadSentinel(f.path, user)) {
-                return { path: f.path, kind: 'pin-protected' as const };
+                return { path: f.path, id, kind: 'pin-protected' as const };
               }
               if (!include_diffs) {
                 const { diffs, ...rest } = f;
-                return rest;
+                return { ...rest, id };
               }
               // Filter binary/XML diffs
               return {
                 ...f,
+                id,
                 diffs: f.diffs.map((d) => {
                   if (!d) return d;
                   if (/\.(svg|png|xml)$/i.test(f.path) || d.includes('mxGraphModel') || d.includes('mxfile')) {
@@ -1108,7 +1115,10 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       { description: 'A markdown note', mimeType: 'text/markdown' },
       async (uri, variables) => {
         const notePath = variables.path as string;
-        const content = await this.filesService.readFile(notePath);
+        // Same gates as read_note. readFile checks visibility first, so the
+        // PIN check never reveals a lock on a note the caller cannot see.
+        const content = await this.filesService.readFile(notePath, user.email.toLowerCase());
+        if (await this.pinReadSentinel(notePath, user)) throw new Error(`pin-protected: ${notePath}`);
         return {
           contents: [{
             uri: uri.href,

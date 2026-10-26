@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { DocHandle } from '../entities/doc-handle.entity';
 
@@ -62,11 +62,8 @@ export class DocHandlesService {
   async findOrCreateForPaths(paths: string[]): Promise<Map<string, string>> {
     const unique = [...new Set(paths)];
     const ids = new Map<string, string>();
-    for (let i = 0; i < unique.length; i += LOOKUP_BATCH) {
-      const rows = await this.repo.find({
-        where: { path: In(unique.slice(i, i + LOOKUP_BATCH)), tombstoneAt: IsNull() },
-      });
-      for (const row of rows) ids.set(row.path, row.id);
+    for (const row of await this.findRows(unique)) {
+      if (row.tombstoneAt === null) ids.set(row.path, row.id);
     }
     for (const path of unique) {
       if (!ids.has(path)) ids.set(path, await this.findOrCreateForPath(path));
@@ -78,6 +75,22 @@ export class DocHandlesService {
   async forPath(path: string): Promise<string | null> {
     const row = await this.repo.findOne({ where: { path } });
     return row?.id ?? null;
+  }
+
+  /** Batch forPath: a path → id map for the paths that have a row, tombstoned
+   * or not. Never mints, so it is safe on paths that may no longer exist. */
+  async forPaths(paths: string[]): Promise<Map<string, string>> {
+    const ids = new Map<string, string>();
+    for (const row of await this.findRows([...new Set(paths)])) ids.set(row.path, row.id);
+    return ids;
+  }
+
+  private async findRows(paths: string[]): Promise<DocHandle[]> {
+    const rows: DocHandle[] = [];
+    for (let i = 0; i < paths.length; i += LOOKUP_BATCH) {
+      rows.push(...(await this.repo.find({ where: { path: In(paths.slice(i, i + LOOKUP_BATCH)) } })));
+    }
+    return rows;
   }
 
   /** Resolve a handle id to its path + tombstone status. Throws NotFoundException

@@ -326,7 +326,7 @@ The flow uses OAuth 2.1 with PKCE and Dynamic Client Registration (RFC 7591). Ad
 | `resolve_comment` | Resolve or unresolve a comment thread |
 | `get_updates` | Get a summary of recent changes with diffs |
 
-Every tool that targets an existing note accepts either `path` or `id`. The id is the note's stable identifier, the same one used in `/doc/<id>` app URLs. It survives renames and moves, and is returned by `search_notes`, `read_note`, `create_note` and `list_files` (with `include_ids: true`).
+Every tool that targets an existing note accepts either `path` or `id`. The id is the note's stable identifier, the same one used in `/doc/<id>` app URLs. It survives renames and moves, and is returned by `search_notes`, `read_note`, `create_note`, `get_updates` and `list_files` (with `include_ids: true`).
 
 ### Resources
 

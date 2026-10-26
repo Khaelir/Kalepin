@@ -121,6 +121,20 @@ describe('DocHandlesService.forPath', () => {
   });
 });
 
+describe('DocHandlesService.forPaths', () => {
+  beforeEach(setup);
+  afterEach(teardown);
+
+  it('returns active and tombstoned ids and never mints', async () => {
+    const live = await service.findOrCreateForPath('Notes/A.md');
+    const gone = await service.findOrCreateForPath('Notes/B.md');
+    await service.tombstone(gone);
+    const ids = await service.forPaths(['Notes/A.md', 'Notes/B.md', 'Notes/C.md']);
+    assert.deepEqual([...ids.entries()].sort(), [['Notes/A.md', live], ['Notes/B.md', gone]]);
+    assert.equal(await repo.count(), 2);
+  });
+});
+
 describe('DocHandlesService.resolve', () => {
   beforeEach(setup);
   afterEach(teardown);
