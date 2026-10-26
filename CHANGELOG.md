@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.83 — 2026-10-26
 
 ### Added
 
@@ -10,6 +10,13 @@
 - **Templates and daily notes.** "From template…" and "Today's note" in the create popover, ⌘⇧D / Ctrl+Shift+D for today's note, a sample-template action, `GET /api/templates`, `POST /api/daily-notes`, and `template` / `timezone` on `POST /api/vault/items`. MCP: `create_note` accepts `template` and `timezone` (`content` is now optional), and a new `daily_note` tool.
 - **Notification inbox.** A bell in the top bar with a live unread badge lists comment mentions, doc mentions, thread replies and "shared with you" events. Items follow notes through renames and moves and hide when you lose access. New `GET /api/notifications`, `GET /api/notifications/unread-count`, `POST /api/notifications/:id/read`, `POST /api/notifications/read-all`.
 - **Email notification preferences.** Settings → Email notifications: *All activity* / *Mentions and shares* / *None*. Every notification email has an unsubscribe link plus `List-Unsubscribe` headers (one-click supported). Sharing a note with a registered user now emails them (at most one email per sharer per minute).
+
+### Security
+
+- **CEK handoff tokens can no longer act as sessions.** A token from `GET /api/files/secure/cek-handoff` was signed with the session secret, so any `notes:read` credential could mint one and use it as a full session for five minutes. Handoff tokens now use a per-purpose key, session verification pins HS256 and rejects purpose-scoped tokens, and the endpoint needs `notes:edit`.
+- **Note PINs now cover every surface.** The REST change feed and search no longer return diffs, snippets or comment threads of a PIN-locked note without its unlock (the note is listed by path only). The same applies to every MCP tool and prompt that reads or writes a note: `list_comments`, `add_comment`, `read_attachment`, the review/summarize prompts, and "multiple notes match" listings.
+- **`POST /api/files/create` checks the PIN on the path it actually writes.** Sending `x` instead of `x.md` used to skip the check and overwrite the locked note.
+- **Folder rename and delete cascades match paths exactly.** A shared folder named `__sers` or `_Users` could re-point or revoke other users' share links, grants and `/doc/` handles under `_users/`; prefixes are now compared exactly and case-sensitively.
 
 ### Fixed
 
