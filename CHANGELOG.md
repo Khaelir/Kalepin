@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.85 — 2026-11-24
+
+### Added
+
+- **MCP links, history and trash.** `get_links` lists a note's backlinks (with the text of the linking line), outgoing links and, with `include_unlinked`, notes that mention it without linking. `note_history`, `read_version` and `restore_version` let an agent look at and undo edits; a restore keeps the replaced content as a version. `list_trash` and `restore_from_trash` bring back deleted notes and folders, and `delete_note` now returns the `trash_id`. Text quoted from PIN-locked notes stays hidden.
+- **MCP section editing.** `read_note` takes `section` to return one heading's section, and `append_to_note` takes `under_heading` to append to the end of a section (a list item joins the list).
+
+### Fixed
+
+- Links are no longer stored twice when a note is created, and a `[[link]]` written before its target note existed now resolves as soon as that note is created, instead of staying broken until the linking note was edited. Both showed in the backlinks panel.
+- Version history lists changes made within the same second newest first.
+
 ## 0.5.84 — 2026-11-24
 
 ### Added
