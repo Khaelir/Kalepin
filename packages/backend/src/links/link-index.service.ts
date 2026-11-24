@@ -1,6 +1,6 @@
 import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, In, IsNull } from 'typeorm';
 import { STORAGE_ADAPTER, StorageAdapter } from '../storage';
 import { FileWatcherService } from '../files/file-watcher.service';
 import { NoteLink } from '../entities';
@@ -59,6 +59,12 @@ export class LinkIndexService {
   private readonly logger = new Logger(LinkIndexService.name);
   private allPaths: string[] = [];
   private healSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Pending index update per source path. An update deletes the path's rows
+   * then inserts the new ones; a note write fires both the internal-write fast
+   * path and the watcher, and two interleaved updates would store every link twice.
+   */
+  private readonly indexQueue = new Map<string, Promise<void>>();
   /** Callback set by OT gateway to broadcast operations to clients. */
   private otBroadcast?: (docId: string, ops: unknown, rev: number, exclude?: WebSocket) => void;
 
@@ -98,10 +104,7 @@ export class LinkIndexService {
       if (!event.path.endsWith('.md')) return;
 
       if (event.event === 'add') {
-        // Add to path list
-        if (!this.allPaths.includes(event.path)) {
-          this.allPaths.push(event.path);
-        }
+        const isNew = this.trackPath(event.path);
         try {
           const content = await this.storage.read(event.path);
           await this.indexFile(event.path, content);
@@ -109,6 +112,7 @@ export class LinkIndexService {
         } catch {
           // File might be gone
         }
+        if (isNew) await this.resolveLinksTo(event.path);
       } else if (event.event === 'change') {
         try {
           const content = await this.storage.read(event.path);
@@ -127,9 +131,7 @@ export class LinkIndexService {
     // Internal-write fast path: indexer consumes content with no disk read.
     this.fileWatcher.onInternalWrite(async (notePath, content) => {
       if (!notePath.endsWith('.md')) return;
-      if (!this.allPaths.includes(notePath)) {
-        this.allPaths.push(notePath);
-      }
+      const isNew = this.trackPath(notePath);
       try {
         await this.indexFile(notePath, content);
         await this.setIndexedMtimeFromDisk(notePath);
@@ -138,6 +140,7 @@ export class LinkIndexService {
           `internal-write index update failed for "${notePath}": ${(err as Error).message}`,
         );
       }
+      if (isNew) await this.resolveLinksTo(notePath);
     });
 
     // Heal sweep — every 10 min, reconcile link index against disk.
@@ -220,7 +223,50 @@ export class LinkIndexService {
     return { reindexed, removed };
   }
 
+  /** Add a note path to the resolution list; true when it was not known yet. */
+  private trackPath(notePath: string): boolean {
+    if (this.allPaths.includes(notePath)) return false;
+    this.allPaths.push(notePath);
+    return true;
+  }
+
+  /**
+   * Point links left unresolved at a note that now exists. Without this, a
+   * [[link]] written before its target note stays broken until the linking
+   * note is edited: the heal sweep only re-parses files whose mtime moved.
+   */
+  async resolveLinksTo(newPath: string): Promise<void> {
+    try {
+      const unresolved = await this.linkRepo.find({ where: { targetPath: IsNull() } });
+      const ids = unresolved
+        .filter((l) => (l.linkType === 'wikilink'
+          ? resolveWikilink(l.rawTarget, l.sourcePath, this.allPaths)
+          : resolveMarkdownLink(l.rawTarget, l.sourcePath)) === newPath)
+        .map((l) => l.id);
+      if (ids.length === 0) return;
+      // A guarded UPDATE, not save(): a row deleted meanwhile by a re-index must stay deleted.
+      await this.linkRepo.update({ id: In(ids), targetPath: IsNull() }, { targetPath: newPath });
+    } catch (err) {
+      this.logger.warn(`resolving links to "${newPath}" failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Run index updates of one source path one after another. */
+  private serialize(filePath: string, task: () => Promise<void>): Promise<void> {
+    const run = (this.indexQueue.get(filePath) ?? Promise.resolve()).catch(() => {}).then(task);
+    this.indexQueue.set(filePath, run);
+    const cleanup = () => {
+      if (this.indexQueue.get(filePath) === run) this.indexQueue.delete(filePath);
+    };
+    run.then(cleanup, cleanup);
+    return run;
+  }
+
   async indexFile(filePath: string, content: string): Promise<void> {
+    return this.serialize(filePath, () => this.replaceLinks(filePath, content));
+  }
+
+  private async replaceLinks(filePath: string, content: string): Promise<void> {
     // Delete existing links from this source
     await this.linkRepo.delete({ sourcePath: filePath });
 
@@ -276,7 +322,9 @@ export class LinkIndexService {
   }
 
   async removeFile(filePath: string): Promise<void> {
-    await this.linkRepo.delete({ sourcePath: filePath });
+    return this.serialize(filePath, async () => {
+      await this.linkRepo.delete({ sourcePath: filePath });
+    });
   }
 
   async getBacklinks(targetPath: string, userEmail?: string): Promise<BacklinkEntry[]> {
