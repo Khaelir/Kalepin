@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.84 — 2026-11-24
+
+### Added
+
+- **MCP `move_note`.** Move or rename a note by `path` or `id` with `new_path` (end it with `/` to keep the file name). Like a drag in the file tree, the note keeps its id and `/doc/` link, its comments, share links and grants follow it, and links to it in other notes are rewritten. PIN-locked notes and moves into or out of the Encrypted Folder are refused. Requires the `rw` scope.
+
+### Fixed
+
+- A long Personal folder no longer pushes the Vault out of reach in the sidebar. Starred, Recent, Tags and all trees now scroll together, the head, filter box and Trash stay in place, and the Personal / Shared with me / Vault headings stay pinned while their tree scrolls.
+
 ## 0.5.83 — 2026-10-26
 
 ### Added
