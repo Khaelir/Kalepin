@@ -8,6 +8,10 @@ COPY patches/ patches/
 COPY packages/backend/package.json packages/backend/
 COPY packages/frontend/package.json packages/frontend/
 COPY packages/shared/package.json packages/shared/
+# onnxruntime-node's postinstall fetches its CUDA add-on from a GitHub release
+# that now answers 404. Embeddings run on the CPU runtime bundled in the npm
+# package, so skip it (deps-prod inherits this).
+ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 RUN pnpm install --frozen-lockfile
 
 # Stage 2a: Vendor draw.io assets (parallel, cached independently)
