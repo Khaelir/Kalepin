@@ -33,6 +33,22 @@ import { TagIndexService } from '../tags/tag-index.service';
 const NOTE_ID_DESCRIPTION =
   'Stable note id, as returned by search_notes, read_note, create_note or list_files. Unlike the path, it survives renames and moves. Pass either path or id; id wins if both are given.';
 
+/**
+ * Where move_note puts `src`. A trailing "/" names a folder and keeps the
+ * note's file name ("/" alone is the vault root); otherwise `newPath` is the
+ * full destination, with ".md" added when missing, as create_note does.
+ */
+export function moveDestination(src: string, newPath: string): string {
+  const cleaned = newPath.trim().replace(/\/{2,}/g, '/').replace(/^\/+/, '');
+  if (newPath.trim().endsWith('/')) {
+    const folder = cleaned.replace(/\/+$/, '');
+    const name = src.split('/').pop()!;
+    return folder ? `${folder}/${name}` : name;
+  }
+  if (!cleaned) throw new Error('new_path must name the destination of the note.');
+  return cleaned.endsWith('.md') ? cleaned : `${cleaned}.md`;
+}
+
 interface McpSession {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
@@ -417,6 +433,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     'patch_note',
     'append_to_note',
     'edit_note',
+    'move_note',
     'delete_note',
     'daily_note',
     // Comment-write tools (canWrite)
@@ -888,6 +905,42 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         await this.assertPinUnlockedForWrite(resolvedPath, user);
         await this.filesService.createFile(resolvedPath, content, user.sub, base_hash, email);
         return { content: [{ type: 'text' as const, text: `Updated note: ${resolvedPath}` }] };
+      }),
+    );
+
+    server.registerTool(
+      'move_note',
+      {
+        description: 'Move or rename a note, like dragging it to another folder in the Kalepin UI. Its stable id and /doc/<id> URL stay the same, links to it in other notes are rewritten, and its comments, share links and grants follow it. Fails if a note already exists at the destination. Moving a note out of your personal folder makes it visible to everyone who can see the destination folder. Notes cannot be moved into or out of the encrypted folder (_secure/) here.',
+        inputSchema: {
+          path: z.string().optional().describe('Current path of the note (e.g. "inbox/idea.md")'),
+          id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
+          new_path: z.string().describe('Destination path including the file name (e.g. "projects/archive/idea.md"); ".md" is added when missing. End it with "/" to keep the current file name (e.g. "projects/archive/"). Missing folders are created.'),
+        },
+      },
+      this.wrapTool('move_note', user, async ({ path, id, new_path }) => {
+        const email = user.email.toLowerCase();
+        const resolved = await this.resolveNoteRef({ path, id }, email);
+        if (resolved.length === 0) {
+          return { content: [{ type: 'text' as const, text: `No notes found matching "${id ?? path}".` }] };
+        }
+        if (resolved.length > 1) {
+          const listing = resolved.map((r) => `- ${r.path}`).join('\n');
+          return { content: [{ type: 'text' as const, text: `Multiple notes match "${path}":\n${listing}\nPlease use the full path.` }] };
+        }
+        const src = resolved[0].path;
+        const dest = moveDestination(src, new_path);
+        if (this.encryptionPredicates.isE2EEncrypted(src) || this.encryptionPredicates.isE2EEncrypted(dest)) {
+          throw new Error('Notes cannot be moved into or out of the encrypted folder (_secure/) through MCP: the note must be re-encrypted in the browser. Use the Kalepin UI.');
+        }
+        // As in the REST move, the PIN is bound to the source note.
+        await this.assertPinUnlockedForWrite(src, user);
+        await this.filesService.move(src, dest, email);
+        if (src === dest) {
+          return { content: [{ type: 'text' as const, text: `Note is already at ${dest}.` }] };
+        }
+        const noteId = await this.docHandles.findOrCreateForPath(dest);
+        return { content: [{ type: 'text' as const, text: `Moved note: ${src} → ${dest} (id: ${noteId})` }] };
       }),
     );
 

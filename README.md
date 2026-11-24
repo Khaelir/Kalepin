@@ -348,6 +348,7 @@ The tools a client sees depend on the scope of its key or grant: **Read-only** (
 | `patch_note` | rw | Replace exactly one occurrence of `old_text`; fails if it is missing or ambiguous |
 | `append_to_note` | rw | Append content to the end of a note without rewriting it |
 | `edit_note` | rw | Replace the whole content of a note |
+| `move_note` | rw | Move or rename a note; its id, comments and share links follow it and links to it are rewritten |
 | `delete_note` | rw | Move a note to the trash (restorable from Trash; Encrypted Folder notes are deleted permanently) |
 | `list_backups` | admin | List the S3 backups with dates and sizes |
 | `create_backup` | admin | Run an S3 backup now |

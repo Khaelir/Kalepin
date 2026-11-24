@@ -446,6 +446,7 @@ test.describe('personal-folder leak-token property suite (Phase 4)', () => {
         case 'patch_note': return { path: probe, oldText: BODYTOK, newText: '' };
         case 'append_to_note': return { path: probe, content: '' };
         case 'edit_note': return { path: probe, content: '' };
+        case 'move_note': return { path: probe, new_path: 'Notes/leak-probe-moved.md' };
         case 'delete_note': return { path: probe };
         case 'add_comment': return { path: probe, blockId: 'b', text: '' };
         case 'resolve_comment': return { path: probe, blockId: 'b', threadId: 't', resolved: true };
