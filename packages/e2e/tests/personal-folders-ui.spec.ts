@@ -101,6 +101,37 @@ test.describe('Phase 15 — Personal folder UI surfaces', () => {
     await expect(personalTree.locator('.file-tree-node', { hasText: 'PersonalDiary.md' })).toBeVisible();
   });
 
+  test('a long personal folder scrolls the Vault into view instead of hiding it', async ({ page }) => {
+    const email = `phase15-scroll-${Date.now()}@example.com`;
+    const token = makeToken(email);
+    await ensureFolderExists(token);
+    for (let i = 0; i < 40; i++) {
+      await createNoteAt(token, `_users/${email}/Personal note ${String(i).padStart(2, '0')}.md`, `# Note ${i}\n`);
+    }
+    const vaultNote = `Vault scroll probe ${Date.now()}`;
+    await createNoteAt(token, `${vaultNote}.md`, '# Vault\n');
+
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await authAndOpenWorkspace(page, token);
+    const personalTree = page.locator('.file-tree[data-section="personal"]');
+    await expect(personalTree.locator('.file-tree-node', { hasText: 'Personal note 39' })).toBeAttached();
+
+    const vaultRow = page.locator('.file-tree[data-section="shared"] .file-tree-node', { hasText: vaultNote });
+    const vaultHeading = page.locator('.sidebar-tree-heading', { hasText: 'Vault' });
+    await expect(vaultRow).not.toBeInViewport();
+
+    // Scroll the way a user does: the wheel over the personal notes.
+    // Steps stay shorter than the scroll area, so the row cannot be skipped.
+    await personalTree.locator('.file-tree-node', { hasText: 'Personal note 05' }).hover();
+    await expect(async () => {
+      await page.mouse.wheel(0, 300);
+      await expect(vaultRow).toBeInViewport({ timeout: 300 });
+    }).toPass({ timeout: 15_000 });
+    await expect(vaultHeading).toBeInViewport();
+    // The Trash entry stays pinned below the scroll area.
+    await expect(page.locator('.kp-trash-entry')).toBeInViewport();
+  });
+
   test('15.1 personal section is empty when the user has no personal notes yet', async ({ page }) => {
     // A fresh user that has authenticated (so ensurePersonalFolder has created
     // an empty `personal/{email}/` directory) but has not created any personal

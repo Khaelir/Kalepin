@@ -898,18 +898,34 @@ body {
 }
 .sidebar-search input:focus { border-color: var(--kalepin-primary); }
 
+/* Starred/Recent/Tags and every tree scroll together; the head, filter box and
+   Trash stay put. Each tree sizes to its content, so a long Personal folder
+   scrolls the Vault into view instead of squeezing it to nothing. */
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-scroll > * { flex-shrink: 0; }
+
+/* Personal / Shared with me / Vault stay in view while their tree scrolls by. */
+.sidebar-tree-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--kalepin-bg-elevated);
+}
+
 /* File tree (restyled rows per spec) */
 .file-tree {
-  flex: 1;
-  overflow-y: auto;
-  padding: 2px 0 12px;
+  padding: 2px 0 4px;
 }
-/* Personal and shared-with-me size to content; only the Vault tree fills remaining height. */
-.file-tree[data-section='personal'],
-.file-tree[data-section='shared-with-me'] {
-  flex: 0 0 auto;
-  overflow: visible;
-  padding-bottom: 4px;
+/* The Vault tree fills the space left below it, which stays its right-click target. */
+.file-tree[data-section='shared'] {
+  flex-grow: 1;
+  padding-bottom: 12px;
 }
 
 .file-tree-node {

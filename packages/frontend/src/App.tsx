@@ -1672,6 +1672,9 @@ export function App() {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
+            {/* One scroll area for the sections and all trees: a long Personal
+                folder must not push the Vault out of reach. */}
+            <div className="sidebar-scroll">
             <div className="sidebar-sections">
               <StarredSection stars={stars} activePath={activeFile} onOpen={(p) => { setView('workspace'); openFile(p); }} />
               <RecentSection activePath={activeFile} onOpen={(p) => { setView('workspace'); openFile(p); }} />
@@ -1722,7 +1725,7 @@ export function App() {
                 <>
                   {hasPersonal && (
                     <>
-                      <div className="sidebar-sections">
+                      <div className="sidebar-sections sidebar-tree-heading">
                         <SidebarSectionTitle>Personal</SidebarSectionTitle>
                       </div>
                       <FileTree {...commonProps} section="personal" />
@@ -1730,13 +1733,13 @@ export function App() {
                   )}
                   {hasSharedWithMe && (
                     <>
-                      <div className="sidebar-sections">
+                      <div className="sidebar-sections sidebar-tree-heading">
                         <SidebarSectionTitle>Shared with me</SidebarSectionTitle>
                       </div>
                       <FileTree {...commonProps} section="shared-with-me" />
                     </>
                   )}
-                  <div className="sidebar-sections">
+                  <div className="sidebar-sections sidebar-tree-heading">
                     <SidebarSectionTitle>
                       Vault
                       {sharedEncrypted && (
@@ -1753,6 +1756,7 @@ export function App() {
                 </>
               );
             })()}
+            </div>
             <button type="button" className="kp-node kp-trash-entry" onClick={() => setTrashOpen(true)}>
               <Icon name="delete" size={16} className="kp-node-icon" />
               <span className="kp-node-label">Trash</span>
