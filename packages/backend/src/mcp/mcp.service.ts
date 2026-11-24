@@ -8,7 +8,7 @@ import { OAuthEventBus, type AccessTokenRevocation, type ApiKeyRevocation } from
 import { FilesService } from '../files';
 import { SearchService } from '../search/search.service';
 import { CommentsService } from '../comments/comments.service';
-import { ChangeTrackingService } from '../changes';
+import { ChangeTrackingService, VersionHistoryService } from '../changes';
 import { BackupService } from '../backup/backup.service';
 import { StatsService } from '../stats/stats.service';
 import { OTService } from '../ot/ot.service';
@@ -28,6 +28,10 @@ import { TemplatesService, type TemplateActor } from '../templates/templates.ser
 import { resolveTimeZone, todayIn } from '../templates/template-renderer';
 import { RelatedNotesService, type RelatedNotesResult } from '../search/related-notes.service';
 import { TagIndexService } from '../tags/tag-index.service';
+import type { LinkIndexService } from '../links/link-index.service';
+import { TrashService } from '../trash/trash.service';
+import { trashRetentionDays } from '../trash/trash-retention.service';
+import { headingOutline, insertIntoSection, readSections } from './markdown-sections';
 
 /** Shared schema text for the `id` argument every note-targeting tool accepts. */
 const NOTE_ID_DESCRIPTION =
@@ -111,6 +115,9 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     @Optional() private readonly templates?: TemplatesService,
     @Optional() private readonly relatedNotes?: RelatedNotesService,
     @Optional() private readonly tagIndex?: TagIndexService,
+    @Optional() @Inject('LINK_INDEX_SERVICE') private readonly linkIndex?: LinkIndexService,
+    @Optional() private readonly versionHistory?: VersionHistoryService,
+    @Optional() private readonly trash?: TrashService,
   ) {
     this.appUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
 
@@ -428,6 +435,10 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     'list_comments',
     'related_notes',
     'list_tags',
+    'get_links',
+    'note_history',
+    'read_version',
+    'list_trash',
     // Write tools (canWriteNotes)
     'create_note',
     'patch_note',
@@ -435,6 +446,8 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     'edit_note',
     'move_note',
     'delete_note',
+    'restore_version',
+    'restore_from_trash',
     'daily_note',
     // Comment-write tools (canWrite)
     'add_comment',
@@ -526,15 +539,16 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     server.registerTool(
       'read_note',
       {
-        description: 'Read the markdown content of a note, including comment threads. Use maxLength to get an outline preview for long notes instead of full content.',
+        description: 'Read the markdown content of a note, including comment threads. Use maxLength to get an outline preview for long notes instead of full content, then section to read just the part you need.',
         inputSchema: {
           path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
           id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
           maxLength: z.number().int().positive().optional().describe('Max content length in chars. If content exceeds this, returns heading outline + first paragraph instead of full content.'),
           include_resolved: z.boolean().optional().describe('Include resolved comment threads (default: false)'),
+          section: z.string().optional().describe('Only return this section: a heading such as "Decisions" (any level) or "## Decisions" (that level only), case-insensitive, with everything under it up to the next heading of the same or a higher level. Comment threads are summarised, not listed.'),
         },
       },
-      this.wrapTool('read_note', user, async ({ path, id, maxLength, include_resolved }) => {
+      this.wrapTool('read_note', user, async ({ path, id, maxLength, include_resolved, section }) => {
         const email = user.email.toLowerCase();
         const resolved = await this.resolveNoteRef({ path, id }, email);
 
@@ -582,6 +596,18 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           open: allThreads.filter((t) => !t.resolved).length,
           resolved: allThreads.filter((t) => t.resolved).length,
         };
+
+        // Section mode: only the requested part of the note
+        if (section) {
+          const parts = readSections(content, section);
+          const header = [`path: ${notePath}`, `id: ${noteId}`, `contentHash: ${contentHash}`];
+          if (parts.length === 0) {
+            return { content: [{ type: 'text' as const, text: `${header.join('\n')}\n\nNo section "${section}" in this note. Its headings:\n${headingOutline(content)}` }] };
+          }
+          if (attachments.length > 0) header.push(`attachments: ${JSON.stringify(attachments)}`);
+          header.push(`[Open in Kalepin](${noteUrl})`, `comments: ${JSON.stringify(commentSummary)}`);
+          return { content: [{ type: 'text' as const, text: `${header.join('\n')}\n\n${parts.join('\n\n---\n\n')}` }] };
+        }
 
         // Preview mode: return outline instead of full content
         if (maxLength && content.length > maxLength) {
@@ -784,6 +810,178 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
       }),
     );
 
+    if (this.linkIndex) {
+      const linkIndex = this.linkIndex;
+      server.registerTool(
+        'get_links',
+        {
+          description: 'List the links around a note: `backlinks` (notes that link to it, with the line number and the text of that line), `outgoing` (what it links to; `path` is null when the target note does not exist) and, with include_unlinked, `unlinked_mentions` (notes that mention its title without linking to it). Check backlinks before deleting a note to see which links would break.',
+          inputSchema: {
+            path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
+            id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
+            include_unlinked: z.boolean().optional().describe('Also list notes that mention the note\'s title without linking to it (default: false)'),
+          },
+          annotations: { readOnlyHint: true },
+        },
+        this.wrapTool('get_links', user, async ({ path, id, include_unlinked }) => {
+          const email = user.email.toLowerCase();
+          const note = await this.resolveOneNote({ path, id }, email);
+          if (note.reply) return note.reply;
+          const notePath = note.path;
+          const pinSentinel = await this.pinReadSentinel(notePath, user);
+          if (pinSentinel) return pinSentinel;
+          if (this.encryptionPredicates.isE2EEncrypted(notePath)) {
+            return { content: [{ type: 'text' as const, text: `kind: e2e-encrypted\npath: ${notePath}\nLinks are not indexed for end-to-end encrypted notes.` }] };
+          }
+          const [backlinks, outgoing, unlinked] = await Promise.all([
+            linkIndex.getBacklinks(notePath, email),
+            linkIndex.getOutgoingLinks(notePath, email),
+            include_unlinked ? linkIndex.getUnlinkedMentions(notePath, email) : Promise.resolve(null),
+          ]);
+          const notePaths = [
+            notePath,
+            ...backlinks.map((b) => b.sourcePath),
+            ...outgoing.flatMap((o) => (o.targetPath ? [o.targetPath] : [])),
+            ...(unlinked ?? []).map((u) => u.sourcePath),
+          ].filter((p) => p.endsWith('.md'));
+          const ids = await this.docHandles.findOrCreateForPaths([...new Set(notePaths)]);
+          // The text around a link quotes the linking note, so it stays behind that note's PIN.
+          const quotable = async (p: string) => !(await this.pinReadSentinel(p, user));
+          const result: Record<string, unknown> = {
+            path: notePath,
+            id: ids.get(notePath),
+            backlinks: await Promise.all(backlinks.map(async (b) => ({
+              path: b.sourcePath,
+              id: ids.get(b.sourcePath),
+              line: b.lineNumber,
+              ...(b.context && (await quotable(b.sourcePath)) ? { context: b.context } : {}),
+            }))),
+            outgoing: outgoing.map((o) => ({
+              path: o.targetPath,
+              ...(o.targetPath && ids.has(o.targetPath) ? { id: ids.get(o.targetPath) } : {}),
+              target: o.rawTarget,
+              line: o.lineNumber,
+            })),
+          };
+          if (unlinked) {
+            result.unlinked_mentions = await Promise.all(unlinked.map(async (u) => ({
+              path: u.sourcePath,
+              id: ids.get(u.sourcePath),
+              line: u.lineNumber,
+              ...((await quotable(u.sourcePath)) ? { context: u.context } : {}),
+            })));
+          }
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], _logOpts: { resultCount: backlinks.length } };
+        }),
+      );
+    }
+
+    if (this.versionHistory) {
+      const versionHistory = this.versionHistory;
+      server.registerTool(
+        'note_history',
+        {
+          description: 'List the saved versions of a note, newest first. Each change has a `change_id`, an `action` (created, modified or deleted), its `author` and its time (`at`). Pass a change_id to read_version to see the note as it was right after that change, or to restore_version to bring that version back.',
+          inputSchema: {
+            path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
+            id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
+            limit: z.number().int().min(1).max(100).optional().describe('Maximum number of changes (default 20, max 100)'),
+          },
+          annotations: { readOnlyHint: true },
+        },
+        this.wrapTool('note_history', user, async ({ path, id, limit }) => {
+          const email = user.email.toLowerCase();
+          const note = await this.resolveOneNote({ path, id }, email);
+          if (note.reply) return note.reply;
+          const notePath = note.path;
+          // Past versions are note content: same gates as read_note.
+          const pinSentinel = await this.pinReadSentinel(notePath, user);
+          if (pinSentinel) return pinSentinel;
+          if (this.encryptionPredicates.isE2EEncrypted(notePath)) {
+            return { content: [{ type: 'text' as const, text: `kind: e2e-encrypted\npath: ${notePath}\nThe server keeps no content history for end-to-end encrypted notes.` }] };
+          }
+          const history = await versionHistory.getHistory(notePath);
+          const changes = history.slice(0, limit ?? 20).map((h) => ({
+            change_id: h.id,
+            action: h.action,
+            author: h.userEmail,
+            at: h.createdAt,
+          }));
+          const noteId = await this.docHandles.findOrCreateForPath(notePath);
+          const result = { path: notePath, id: noteId, total: history.length, changes };
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], _logOpts: { resultCount: changes.length } };
+        }),
+      );
+
+      server.registerTool(
+        'read_version',
+        {
+          description: 'Read a note as it was right after one of its changes (a change_id from note_history). Read-only: use restore_version to bring that version back.',
+          inputSchema: {
+            path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
+            id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
+            change_id: z.number().int().positive().describe('change_id from note_history'),
+          },
+          annotations: { readOnlyHint: true },
+        },
+        this.wrapTool('read_version', user, async ({ path, id, change_id }) => {
+          const email = user.email.toLowerCase();
+          const note = await this.resolveOneNote({ path, id }, email);
+          if (note.reply) return note.reply;
+          const notePath = note.path;
+          const pinSentinel = await this.pinReadSentinel(notePath, user);
+          if (pinSentinel) return pinSentinel;
+          if (this.encryptionPredicates.isE2EEncrypted(notePath)) {
+            return { content: [{ type: 'text' as const, text: `kind: e2e-encrypted\npath: ${notePath}\nThe server keeps no content history for end-to-end encrypted notes.` }] };
+          }
+          const change = (await versionHistory.getHistory(notePath)).find((h) => h.id === change_id);
+          if (!change) {
+            return { content: [{ type: 'text' as const, text: `No change ${change_id} in the history of ${notePath}. Use note_history to list its changes.` }] };
+          }
+          const { content, partial } = await versionHistory.reconstructVersion(notePath, change_id);
+          const header = [
+            `path: ${notePath}`,
+            `change_id: ${change_id}`,
+            `action: ${change.action}`,
+            `author: ${change.userEmail ?? 'unknown'}`,
+            `at: ${change.createdAt}`,
+          ];
+          if (partial) header.push('partial: true (a step in this note\'s history no longer applies; parts of this version may be missing)');
+          return { content: [{ type: 'text' as const, text: `${header.join('\n')}\n\n${content}` }] };
+        }),
+      );
+    }
+
+    if (this.trash) {
+      const trash = this.trash;
+      server.registerTool(
+        'list_trash',
+        {
+          description: 'List the notes and folders in the Trash that you can see, most recently deleted first. Each item has the `trash_id` to pass to restore_from_trash, its original path, who deleted it and when. Items are purged for good after `retention_days`.',
+          inputSchema: {
+            query: z.string().optional().describe('Only items whose original path contains this text (case-insensitive)'),
+            limit: z.number().int().min(1).max(200).optional().describe('Maximum number of items (default 50, max 200)'),
+          },
+          annotations: { readOnlyHint: true },
+        },
+        this.wrapTool('list_trash', user, async ({ query, limit }) => {
+          const items = await trash.list(user.email.toLowerCase());
+          const q = query?.trim().toLowerCase();
+          const matching = q ? items.filter((i) => i.originalPath.toLowerCase().includes(q)) : items;
+          const shown = matching.slice(0, limit ?? 50).map((i) => ({
+            trash_id: i.id,
+            kind: i.kind,
+            original_path: i.originalPath,
+            deleted_by: i.deletedByEmail,
+            deleted_at: new Date(i.deletedAt).toISOString(),
+            ...(i.kind === 'folder' ? { item_count: i.itemCount } : {}),
+          }));
+          const result = { retention_days: trashRetentionDays(), total: matching.length, items: shown };
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], _logOpts: { resultCount: shown.length } };
+        }),
+      );
+    }
+
     // --- Write Tools (note mutation — requires rw or admin scope) ---
 
     if (canWriteNotes) {
@@ -854,16 +1052,17 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     server.registerTool(
       'append_to_note',
       {
-        description: 'Append content to the end of an existing note without reading or rewriting the full document. Ideal for adding new sections, list items, or log entries.',
+        description: 'Append content to the end of an existing note without reading or rewriting the full document. Ideal for adding new sections, list items, or log entries. With under_heading, the content goes at the end of that section instead (e.g. a new item under "## TODO").',
         inputSchema: {
           path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
           id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
           content: z.string().describe('Content to append'),
-          separator: z.string().optional().describe('Separator between existing content and appended content (default: "\\n\\n")'),
+          separator: z.string().optional().describe('Separator between existing content and appended content (default: "\\n\\n"; with under_heading, "\\n" when adding a list item after a list item)'),
           base_hash: z.string().optional().describe('Content hash from read_note for conflict detection'),
+          under_heading: z.string().optional().describe('Insert at the end of this section\'s own text, before any sub-heading: a heading such as "TODO" (any level) or "## TODO" (that level only), case-insensitive. Fails if no heading or several headings match.'),
         },
       },
-      this.wrapTool('append_to_note', user, async ({ path, id, content, separator, base_hash }) => {
+      this.wrapTool('append_to_note', user, async ({ path, id, content, separator, base_hash, under_heading }) => {
         const email = user.email.toLowerCase();
         const resolved = await this.resolveNoteRef({ path, id }, email);
         if (resolved.length === 0) {
@@ -875,6 +1074,14 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         }
         const resolvedPath = resolved[0].path;
         await this.assertPinUnlockedForWrite(resolvedPath, user);
+        if (under_heading) {
+          const existing = await this.filesService.readFile(resolvedPath, email);
+          this.filesService.validateBaseHash(existing, base_hash);
+          const updated = insertIntoSection(existing, under_heading, content, separator);
+          // The hash of what was read guards against a write landing in between.
+          await this.filesService.createFile(resolvedPath, updated, user.sub, this.filesService.computeContentHash(existing), email);
+          return { content: [{ type: 'text' as const, text: `Appended to section "${under_heading}" of note: ${resolvedPath}` }] };
+        }
         await this.filesService.appendToFile(resolvedPath, content, separator ?? '\n\n', base_hash, email);
         return { content: [{ type: 'text' as const, text: `Appended to note: ${resolvedPath}` }] };
       }),
@@ -967,12 +1174,78 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
         const resolvedPath = resolved[0].path;
         await this.assertPinUnlockedForWrite(resolvedPath, user);
         const { trashItemId } = await this.filesService.deleteFile(resolvedPath, user.sub, email);
+        const restoreHint = this.trash
+          ? `Restore it with restore_from_trash (trash_id: ${trashItemId}).`
+          : 'It can be restored from Trash.';
         const text = trashItemId
-          ? `Moved note to Trash: ${resolvedPath}. It can be restored from Trash.`
+          ? `Moved note to Trash: ${resolvedPath}. ${restoreHint}`
           : `Deleted note permanently: ${resolvedPath}`;
         return { content: [{ type: 'text' as const, text }] };
       }),
     );
+
+    if (this.versionHistory) {
+      const versionHistory = this.versionHistory;
+      server.registerTool(
+        'restore_version',
+        {
+          description: 'Bring a note back to how it was right after one of its changes (a change_id from note_history). The current content is saved as a version first, so the restore can itself be undone. Open editors reload with the restored text.',
+          inputSchema: {
+            path: z.string().optional().describe('Path to the note (e.g. "projects/design.md")'),
+            id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
+            change_id: z.number().int().positive().describe('change_id from note_history'),
+            base_hash: z.string().optional().describe('Content hash from read_note for conflict detection'),
+          },
+        },
+        this.wrapTool('restore_version', user, async ({ path, id, change_id, base_hash }) => {
+          const email = user.email.toLowerCase();
+          const note = await this.resolveOneNote({ path, id }, email);
+          if (note.reply) return note.reply;
+          const notePath = note.path;
+          await this.assertPinUnlockedForWrite(notePath, user);
+          if (this.encryptionPredicates.isE2EEncrypted(notePath)) {
+            throw new Error('The server keeps no content history for end-to-end encrypted notes.');
+          }
+          // Before the snapshot below, so a read-only grant leaves no history row behind.
+          await this.filesService.assertWritable(notePath, email);
+          const change = (await versionHistory.getHistory(notePath)).find((h) => h.id === change_id);
+          if (!change) {
+            return { content: [{ type: 'text' as const, text: `No change ${change_id} in the history of ${notePath}. Use note_history to list its changes.` }] };
+          }
+          const current = await this.filesService.readFile(notePath, email);
+          this.filesService.validateBaseHash(current, base_hash);
+          const { content: restored, partial } = await versionHistory.reconstructVersion(notePath, change_id);
+          if (partial) {
+            throw new Error(`Change ${change_id} of ${notePath} cannot be rebuilt exactly (a step in its history no longer applies), so nothing was restored. read_version shows the partial text.`);
+          }
+          if (restored === current) {
+            return { content: [{ type: 'text' as const, text: `${notePath} already matches change ${change_id}; nothing to restore.` }] };
+          }
+          await versionHistory.createPreRestoreSnapshot(notePath, current, user.sub);
+          await this.filesService.createFile(notePath, restored, user.sub, this.filesService.computeContentHash(current), email);
+          return { content: [{ type: 'text' as const, text: `Restored ${notePath} to change ${change_id} (${change.createdAt}). The previous content was saved as a version, so this can be undone the same way.` }] };
+        }),
+      );
+    }
+
+    if (this.trash) {
+      const trash = this.trash;
+      server.registerTool(
+        'restore_from_trash',
+        {
+          description: 'Restore a note or folder from the Trash to its original path, or to "<name> (restored)" when that path is now taken. Its comments, share links, grants, stars, PIN and stable id come back with it. The trash_id comes from delete_note or list_trash.',
+          inputSchema: {
+            trash_id: z.string().describe('Trash item id, from delete_note or list_trash'),
+          },
+        },
+        this.wrapTool('restore_from_trash', user, async ({ trash_id }) => {
+          const restored = await trash.restore(trash_id, { userId: user.sub, email: user.email.toLowerCase() });
+          const noteId = restored.kind === 'file' ? await this.docHandles.forPath(restored.path) : null;
+          const what = restored.kind === 'folder' ? 'folder' : 'note';
+          return { content: [{ type: 'text' as const, text: `Restored ${what} from Trash: ${restored.path}${noteId ? ` (id: ${noteId})` : ''}` }] };
+        }),
+      );
+    }
 
     if (this.templates) {
       const templates = this.templates;
@@ -1450,6 +1723,19 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
    * it resolves to the note's current path or to nothing. A path goes through
    * the fuzzy matching of resolveNotePath.
    */
+  /** Resolve a path or id to exactly one note, or to the reply explaining why not. */
+  private async resolveOneNote(
+    ref: { path?: string; id?: string },
+    userEmail: string,
+  ): Promise<{ path: string; reply?: undefined } | { path?: undefined; reply: { content: { type: 'text'; text: string }[] } }> {
+    const resolved = await this.resolveNoteRef(ref, userEmail);
+    if (resolved.length === 1) return { path: resolved[0].path };
+    const text = resolved.length === 0
+      ? `No notes found matching "${ref.id ?? ref.path}".`
+      : `Multiple notes match "${ref.path}":\n${resolved.map((r) => `- ${r.path}`).join('\n')}\nPlease use the full path.`;
+    return { reply: { content: [{ type: 'text' as const, text }] } };
+  }
+
   private async resolveNoteRef(
     ref: { path?: string; id?: string },
     userEmail: string,

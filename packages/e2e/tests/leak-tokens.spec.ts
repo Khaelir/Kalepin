@@ -442,12 +442,18 @@ test.describe('personal-folder leak-token property suite (Phase 4)', () => {
         case 'list_files': return { path: ALICE_ROOT };
         case 'list_comments': return { path: probe };
         case 'related_notes': return { path: probe };
+        case 'get_links': return { path: probe, include_unlinked: true };
+        case 'note_history': return { path: probe };
+        case 'read_version': return { path: probe, change_id: 1 };
+        case 'list_trash': return { query: ALICE_ROOT };
         case 'create_note': return { path: 'Notes/leak-probe.md', content: '' };
         case 'patch_note': return { path: probe, oldText: BODYTOK, newText: '' };
         case 'append_to_note': return { path: probe, content: '' };
         case 'edit_note': return { path: probe, content: '' };
         case 'move_note': return { path: probe, new_path: 'Notes/leak-probe-moved.md' };
         case 'delete_note': return { path: probe };
+        case 'restore_version': return { path: probe, change_id: 1 };
+        case 'restore_from_trash': return { trash_id: 'nonexistent' };
         case 'add_comment': return { path: probe, blockId: 'b', text: '' };
         case 'resolve_comment': return { path: probe, blockId: 'b', threadId: 't', resolved: true };
         case 'get_updates': return { since: '0' };

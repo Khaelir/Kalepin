@@ -334,30 +334,36 @@ The tools a client sees depend on the scope of its key or grant: **Read-only** (
 | Tool | Scope | Description |
 |---|---|---|
 | `search_notes` | ro | Full-text and semantic search across notes and comments; `tag:<name>` tokens filter by tag |
-| `read_note` | ro | Read a note's markdown and comment threads; `maxLength` returns an outline for long notes |
+| `read_note` | ro | Read a note's markdown and comment threads; `maxLength` returns an outline for long notes, `section` just one section |
 | `read_attachment` | ro | Read a draw.io diagram attached to a note as a graph (nodes and edges) |
 | `list_files` | ro | List note paths; `include_ids` adds each note's stable id |
 | `list_tags` | ro | List the tags in notes you can see, with counts |
 | `related_notes` | ro | Notes most semantically similar to a note, with why they match and whether they're linked |
 | `list_comments` | ro | List the comment threads on a note as structured data |
+| `get_links` | ro | Backlinks and outgoing links of a note; `include_unlinked` adds notes that mention it without linking |
+| `note_history` | ro | List a note's saved versions, newest first, with author and time |
+| `read_version` | ro | Read a note as it was right after a given change |
+| `list_trash` | ro | List deleted notes and folders with the `trash_id` to restore them |
 | `get_updates` | ro | Summary of note changes since your last check (or `since`); `include_diffs` adds unified diffs |
 | `add_comment` | rc | Comment on a note, anchored to `quotedText`, or reply to a thread |
 | `resolve_comment` | rc | Resolve or unresolve a comment thread |
 | `create_note` | rw | Create a new note, optionally from a template (`template`, `timezone`) |
 | `daily_note` | rw | Open or create today's (or a given date's) daily note |
 | `patch_note` | rw | Replace exactly one occurrence of `old_text`; fails if it is missing or ambiguous |
-| `append_to_note` | rw | Append content to the end of a note without rewriting it |
+| `append_to_note` | rw | Append content to the end of a note without rewriting it; `under_heading` appends to the end of a section |
 | `edit_note` | rw | Replace the whole content of a note |
 | `move_note` | rw | Move or rename a note; its id, comments and share links follow it and links to it are rewritten |
-| `delete_note` | rw | Move a note to the trash (restorable from Trash; Encrypted Folder notes are deleted permanently) |
+| `delete_note` | rw | Move a note to the trash and return its `trash_id` (Encrypted Folder notes are deleted permanently) |
+| `restore_version` | rw | Bring a note back to an earlier version; the current content is kept as a version first |
+| `restore_from_trash` | rw | Restore a deleted note or folder by `trash_id`, with its comments, shares and id |
 | `list_backups` | admin | List the S3 backups with dates and sizes |
 | `create_backup` | admin | Run an S3 backup now |
 | `restore_backup` | admin | Restore an S3 backup by `key` or `nearTimestamp`, after a safety-net backup; the app restarts |
 | `mcp_stats` | admin | MCP usage and system health over the last 14 days |
 
-The S3 backup tools are only registered when S3 backups are configured. `patch_note`, `append_to_note` and `edit_note` take an optional `base_hash` from `read_note` and refuse the write if the note changed since. Until a PIN-locked note is unlocked, reads return its path with `kind: "pin-protected"` instead of its content, and writes fail with `pin-protected: <path>`.
+The S3 backup tools are only registered when S3 backups are configured. `patch_note`, `append_to_note`, `edit_note` and `restore_version` take an optional `base_hash` from `read_note` and refuse the write if the note changed since. Until a PIN-locked note is unlocked, reads return its path with `kind: "pin-protected"` instead of its content, and writes fail with `pin-protected: <path>`.
 
-Every tool that targets an existing note accepts either `path` or `id` (`notePath` or `noteId` for `read_attachment`). The id is the note's stable identifier, the same one used in `/doc/<id>` app URLs. It survives renames and moves, and is returned by `search_notes`, `read_note`, `create_note`, `daily_note`, `related_notes`, `get_updates` and `list_files` (with `include_ids: true`).
+Every tool that targets an existing note accepts either `path` or `id` (`notePath` or `noteId` for `read_attachment`). The id is the note's stable identifier, the same one used in `/doc/<id>` app URLs. It survives renames and moves, and is returned by `search_notes`, `read_note`, `create_note`, `move_note`, `daily_note`, `related_notes`, `get_links`, `note_history`, `restore_from_trash`, `get_updates` and `list_files` (with `include_ids: true`).
 
 ### Resources
 
