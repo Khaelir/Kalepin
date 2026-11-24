@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.86 — 2026-11-24
+
+### Fixed
+
+- The Docker image builds again. `onnxruntime-node`'s install step downloads its CUDA add-on from a GitHub release that now answers 404, which failed `pnpm install`. The build skips it; embeddings run on the CPU runtime that ships in the package. 0.5.84 and 0.5.85 were tagged but never got an image, so 0.5.86 is the first image with their changes.
+
 ## 0.5.85 — 2026-11-24
 
 ### Added
