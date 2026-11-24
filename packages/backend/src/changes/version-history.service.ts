@@ -23,7 +23,8 @@ export class VersionHistoryService {
   async getHistory(path: string): Promise<HistoryEntry[]> {
     const changes = await this.changeRepo.find({
       where: { path },
-      order: { createdAt: 'DESC' },
+      // createdAt has one-second resolution: the id breaks ties, newest first.
+      order: { createdAt: 'DESC', id: 'DESC' },
     });
 
     // Batch-load user emails
