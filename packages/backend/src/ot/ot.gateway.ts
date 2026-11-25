@@ -44,6 +44,8 @@ interface AuthenticatedWebSocket extends WebSocket {
   cookieHeader?: string;
   /** Docs this socket opened through the doc:open gates (PIN included). */
   openedDocs?: Set<string>;
+  /** Settles when this socket's doc:open in progress, if any, is done. */
+  openQueue?: Promise<void>;
 }
 
 /** How long ops sent under a renamed doc's old id are still routed to the new one. */
@@ -300,11 +302,20 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('doc:open')
-  async handleDocOpen(
+  handleDocOpen(
     @ConnectedSocket() client: AuthenticatedWebSocket,
     @MessageBody() data: { docId: string; unlock?: string },
-  ) {
-    if (!client.user) return;
+  ): Promise<void> {
+    // One open at a time per socket. The WS adapter runs handlers
+    // concurrently, and two overlapping opens each read client.docId after
+    // their awaits, leaving the socket joined to both sessions.
+    const open = (client.openQueue ?? Promise.resolve()).then(() => this.openDoc(client, data));
+    client.openQueue = open.catch(() => undefined);
+    return open;
+  }
+
+  private async openDoc(client: AuthenticatedWebSocket, data: { docId: string; unlock?: string }): Promise<void> {
+    if (!client.user || client.readyState !== WebSocket.OPEN) return;
 
     // Visibility gate — foreign personal docIds are non-observable.
     // Reject without opening, send a not_found error frame; do not close the
@@ -366,6 +377,12 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!opened) {
       // A folder or a file that isn't text: the client falls back to REST.
       client.send(JSON.stringify({ type: 'error', code: 'not_found', docId: data.docId }));
+      return;
+    }
+    if (client.readyState !== WebSocket.OPEN) {
+      // The socket closed while the note loaded. handleDisconnect has already
+      // run and can't see this session: leave it, or it never closes.
+      this.otService.sessionManager.removeClient(data.docId, client);
       return;
     }
     const { content, revision } = opened;

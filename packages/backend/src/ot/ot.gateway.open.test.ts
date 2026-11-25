@@ -12,9 +12,12 @@ import { OTGateway } from './ot.gateway';
 
 /** Paths whose reads fail with the given error, as a broken key or permission would. */
 const unreadable = new Map<string, Error>();
+/** Run while a path is being read, to change things mid-open. */
+const duringRead = new Map<string, () => void>();
 
 class FlakyReadAdapter extends LocalFSAdapter {
   async read(filePath: string): Promise<string> {
+    duringRead.get(filePath)?.();
     const error = unreadable.get(filePath);
     if (error) throw error;
     return super.read(filePath);
@@ -62,6 +65,7 @@ beforeEach(async () => {
   const vault = path.join(tmpRoot, `vault-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   await fs.mkdir(vault, { recursive: true });
   unreadable.clear();
+  duringRead.clear();
   storage = new FlakyReadAdapter(vault);
   ot = new OTService(storage, { save: async () => undefined } as any, { trackChange: async () => undefined } as any);
   gateway = new OTGateway(
@@ -146,5 +150,41 @@ describe('OTGateway doc:open — paths that are not notes', () => {
     assert.equal(wa.sent[0].content, 'hello');
     assert.equal(wb.sent[0].type, 'doc:opened');
     assert.equal(wb.sent[0].content, '');
+  });
+});
+
+describe('OTGateway doc:open — overlapping opens and closing sockets', () => {
+  // Handlers run concurrently and read client.docId after their awaits: two
+  // quick opens left the socket in both sessions, and a socket that closed
+  // mid-open was added after handleDisconnect had run. Those sessions held
+  // dead or foreign sockets and never closed.
+  it('two quick opens leave the socket in the last one only', async () => {
+    await storage.write('a.md', 'a');
+    await storage.write('b.md', 'b');
+    const ws = fakeSocket();
+
+    await Promise.all([
+      gateway.handleDocOpen(ws as any, { docId: 'a.md' }),
+      gateway.handleDocOpen(ws as any, { docId: 'b.md' }),
+    ]);
+
+    assert.equal(ws.docId, 'b.md');
+    assert.ok(ot.sessionManager.getClients('b.md')?.has(ws as any));
+    assert.ok(!ot.sessionManager.getClients('a.md')?.has(ws as any), 'not left behind in a.md');
+    assert.deepEqual(ws.sent.map((m) => [m.type, m.docId]), [['doc:opened', 'a.md'], ['doc:opened', 'b.md']]);
+  });
+
+  it('a socket that closes while the note loads is not left in the session', async () => {
+    await storage.write('a.md', 'a');
+    const ws = fakeSocket();
+    duringRead.set('a.md', () => {
+      ws.readyState = 3; // CLOSED
+      gateway.handleDisconnect(ws as any);
+    });
+
+    await gateway.handleDocOpen(ws as any, { docId: 'a.md' });
+
+    assert.ok(!ot.sessionManager.getClients('a.md')?.has(ws as any));
+    assert.deepEqual(ws.sent, []);
   });
 });
