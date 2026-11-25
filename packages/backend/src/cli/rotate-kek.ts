@@ -79,7 +79,7 @@ async function* walk(root: string, zone: 'personal' | 'shared'): AsyncGenerator<
       continue;
     }
     for (const entry of entries) {
-      // Dot entries are skipped, except the zone trash (restorable notes).
+      // Dot entries are skipped, except comment sidecars and the zone trash.
       if (skipSweepEntry(entry.name, entry.isDirectory(), rel, zone)) continue;
       if (entry.name.includes('.tmp.')) continue;
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;

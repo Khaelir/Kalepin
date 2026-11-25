@@ -15,7 +15,7 @@ import {
   NoKEKError,
 } from './migration-sweep.service';
 import { MemoryKEKSource } from '../crypto/kek-source';
-import { hasEnvelopeMagic, encrypt } from '../crypto/envelope';
+import { hasEnvelopeMagic, encrypt, decrypt } from '../crypto/envelope';
 import { EncryptionPredicates } from '../crypto/encryption-predicates';
 
 class TestPredicates implements EncryptionPredicates {
@@ -189,6 +189,21 @@ describe('MigrationSweepService — happy path', () => {
     for (const rel of ['alice@x.com/diary.md', 'bob@x.com/notes/todo.md']) {
       assert.equal(hasEnvelopeMagic(await readBytes(personalRoot, rel)), true);
     }
+  });
+
+  it('encrypts and decrypts comment sidecars with the notes', async () => {
+    const sidecar = 'alice@x.com/notes/.todo.md.collab';
+    await writePlaintext(personalRoot, sidecar, '{"comments":{}}');
+
+    await sweep.start('personal', 'encrypt');
+    await sweep.whenIdle('personal');
+    const env = await readBytes(personalRoot, sidecar);
+    assert.equal(hasEnvelopeMagic(env), true);
+    assert.equal((await decrypt(env, `_users/${sidecar}`, kek)).toString(), '{"comments":{}}');
+
+    await sweep.start('personal', 'decrypt');
+    await sweep.whenIdle('personal');
+    assert.equal((await readBytes(personalRoot, sidecar)).toString('utf-8'), '{"comments":{}}');
   });
 });
 

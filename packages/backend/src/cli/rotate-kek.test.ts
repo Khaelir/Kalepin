@@ -87,6 +87,22 @@ describe('rotate-kek — end-to-end encrypted files', () => {
   });
 });
 
+describe('rotate-kek — comment sidecars', () => {
+  it('rewraps sidecars with their notes', async () => {
+    await plant(personal, `${USER}/note.md`, `_users/${USER}/note.md`, oldKek);
+    await plant(personal, `${USER}/.note.md.collab`, `_users/${USER}/.note.md.collab`, oldKek);
+    await plant(shared, '.trash/abc/.a.md.collab', '.trash/abc/.a.md.collab', oldKek);
+
+    await rotateRoot(personal, oldKek, newKek);
+    await rotateRoot(shared, oldKek, newKek);
+
+    const p = await decrypt(await readAt(personal, `${USER}/.note.md.collab`), `_users/${USER}/.note.md.collab`, newKek);
+    assert.equal(p.toString(), `body of ${USER}/.note.md.collab`);
+    const s = await decrypt(await readAt(shared, '.trash/abc/.a.md.collab'), '.trash/abc/.a.md.collab', newKek);
+    assert.equal(s.toString(), 'body of .trash/abc/.a.md.collab');
+  });
+});
+
 describe('rotate-kek — zone fingerprints', () => {
   it('binds the enabled zones to the new KEK in the server database', async () => {
     // The schema the server creates (TypeORM synchronize), personal enabled.
