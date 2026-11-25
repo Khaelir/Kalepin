@@ -400,6 +400,24 @@ export class OTSessionManager {
     });
   }
 
+  /**
+   * Save every session's unsaved edits, e.g. before the process exits.
+   * Stops waiting after `timeoutMs`; failures are logged.
+   */
+  async flushAll(timeoutMs: number): Promise<void> {
+    const dirty = [...this.sessions.values()].filter((s) => s.dirty).map((s) => s.docId);
+    if (dirty.length === 0) return;
+    this.logger.log(`Saving ${dirty.length} open note(s)`);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), timeoutMs);
+    });
+    const saved = Promise.all(dirty.map((id) => this.flushNow(id).catch(() => undefined))).then(() => false);
+    const late = await Promise.race([saved, timedOut]);
+    clearTimeout(timer);
+    if (late) this.logger.warn(`Gave up waiting for open notes to save after ${timeoutMs} ms`);
+  }
+
   async flushNow(docId: string): Promise<void> {
     const session = this.sessions.get(docId);
     if (!session) return;

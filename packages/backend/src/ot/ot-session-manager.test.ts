@@ -236,6 +236,34 @@ describe('OTSessionManager.mergeFromDisk', () => {
   });
 });
 
+describe('OTSessionManager.flushAll', () => {
+  it('saves every session with unsaved edits', async () => {
+    manager.getOrCreateSession('a.md', 'a');
+    manager.getOrCreateSession('b.md', 'b');
+    manager.getOrCreateSession('clean.md', 'c');
+    manager.applyOperation('a.md', insert('1', 1, 1), 0, 1);
+    manager.applyOperation('b.md', insert('2', 1, 1), 0, 1);
+
+    await manager.flushAll(5_000);
+
+    assert.deepEqual(flushed.sort((x, y) => x.docId.localeCompare(y.docId)), [
+      { docId: 'a.md', content: 'a1' },
+      { docId: 'b.md', content: 'b2' },
+    ]);
+  });
+
+  it('stops waiting for a write that hangs', async () => {
+    manager.setFlushHandler(() => new Promise<void>(() => {}));
+    manager.getOrCreateSession('a.md', 'a');
+    manager.applyOperation('a.md', insert('1', 1, 1), 0, 1);
+
+    const done = manager.flushAll(5_000);
+    await settle();
+    mock.timers.tick(5_000);
+    await done;
+  });
+});
+
 describe('OTSessionManager — closing while a client comes back', () => {
   // The "did a client re-join?" check ran before the close handler (git
   // commit, embedding drain), and the session was deleted after it anyway:

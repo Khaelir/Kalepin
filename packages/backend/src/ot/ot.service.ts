@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
+import { BeforeApplicationShutdown, Injectable, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import WebSocket from 'ws';
@@ -12,8 +12,11 @@ import { DailyStatsService } from '../stats/daily-stats.service';
 import { DocMentionService } from '../comments/doc-mention.service';
 import { FileWatcherService } from '../files/file-watcher.service';
 
+/** How long shutdown waits for open notes to save (Docker kills after 10 s). */
+const SHUTDOWN_FLUSH_TIMEOUT_MS = 5_000;
+
 @Injectable()
-export class OTService {
+export class OTService implements BeforeApplicationShutdown {
   private readonly logger = new Logger(OTService.name);
   readonly sessionManager = new OTSessionManager();
   private sessionCloseListeners: Array<(docId: string) => Promise<void> | void> = [];
@@ -88,6 +91,14 @@ export class OTService {
    */
   addSessionCloseListener(handler: (docId: string) => Promise<void> | void): void {
     this.sessionCloseListeners.push(handler);
+  }
+
+  /**
+   * On SIGTERM (a deploy) open notes hold up to 15 s of acked edits that are
+   * only in memory: save them while the database is still open.
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.sessionManager.flushAll(SHUTDOWN_FLUSH_TIMEOUT_MS);
   }
 
   /** How ops the server applies itself (merged disk changes, server-side writes) reach a doc's clients. */
