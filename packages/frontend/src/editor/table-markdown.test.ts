@@ -62,11 +62,29 @@ describe('table markdown round-trip', () => {
     ['a wikilink-only cell', table('| [[Roadmap]] | x |'), table('| [[Roadmap]] | x |')],
     ['a wikilink-only header cell', '| [[Roadmap]] | b |\n| --- | --- |\n| 1 | 2 |\n', '| [[Roadmap]] | b |\n| --- | --- |\n| 1 | 2 |\n'],
     ['a mention-only cell', table('| @[bob](bob@x.com) | x |'), table('| @[bob](bob@x.com) | x |')],
+    ['an escaped | in text', table('| x 1\\|2 | y |'), table('| x 1\\|2 | y |')],
+    ['a backslash before an escaped |', table('| a\\\\\\|b | y |'), table('| a\\\\\\|b | y |')],
+    ['inline code containing |', table('| `a\\|b` | y |'), table('| `a\\|b` | y |')],
+    ['an aliased wikilink written [[target\\|alias]]', table('| [[Roadmap\\|the map]] | x |'), table('| [[Roadmap\\|the map]] | x |')],
   ])('keeps %s', (_name, input, expected) => {
     const editor = createEditor(input);
     const output = getMarkdown(editor);
     expect(output).toBe(expected);
     // Reloading what was saved gives back the same document.
     expect(createEditor(output).getJSON()).toEqual(editor.getJSON());
+  });
+
+  it('escapes a | typed into a cell so it does not split the row', () => {
+    const editor = createEditor(table('| x | y |'));
+    let end = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.isText && node.text === 'x') end = pos + node.nodeSize;
+    });
+    editor.view.dispatch(editor.state.tr.insertText(' 1|2', end));
+
+    const output = getMarkdown(editor);
+    expect(output).toBe(table('| x 1\\|2 | y |'));
+    // Compare the table only: the edit also made StarterKit append a trailing paragraph.
+    expect(createEditor(output).getJSON().content?.[0]).toEqual(editor.getJSON().content?.[0]);
   });
 });

@@ -129,7 +129,10 @@ export const TableWithMarkdown = Table.configure({ resizable: false }).extend({
               // Judge emptiness on the markdown, not the text: a cell holding
               // only a wikilink or a mention has no text but is not empty.
               const cellMarkdown = renderCell(state, col);
-              if (cellMarkdown.trim()) state.write(cellMarkdown);
+              // A bare | would end the cell early. GFM reads \| as a literal
+              // pipe anywhere in a cell, including inside code spans and in
+              // wikilink aliases ([[target\|alias]], as Obsidian writes them).
+              if (cellMarkdown.trim()) state.write(cellMarkdown.replace(/\|/g, '\\|'));
             });
             state.write(' |');
             state.ensureNewLine();
