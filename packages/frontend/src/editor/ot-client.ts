@@ -23,6 +23,11 @@ export class OTClient {
   private cleanupFns: (() => void)[] = [];
   /** The server's text at `revision`: every acked and remote op applied, nothing in flight. */
   private confirmedShadow: string = '';
+  /** Settles the socket's doc:open hold once nothing of ours is in flight. */
+  private settleInFlight: (() => void) | null = null;
+  /** The editor went away: destroy once the last op is acked. */
+  private released = false;
+  private static readonly RELEASE_TIMEOUT_MS = 30000;
 
   constructor(ws: WSClient, docId: string, revision: number, onRemoteOp: OpCallback, opts?: { onError?: ErrorCallback; initialShadow?: string }) {
     this.ws = ws;
@@ -47,7 +52,10 @@ export class OTClient {
       this.handleError(msg.message || 'Unknown error');
     });
 
-    this.cleanupFns = [offAck, offOp, offError];
+    // Ops in flight died with the socket; a re-sync re-sends them.
+    const offDisconnected = ws.on('disconnected', () => this.markIdle());
+
+    this.cleanupFns = [offAck, offOp, offError, offDisconnected];
   }
 
   destroy(): void {
@@ -56,6 +64,28 @@ export class OTClient {
       cleanup();
     }
     this.cleanupFns = [];
+    this.settleInFlight?.();
+    this.settleInFlight = null;
+  }
+
+  /**
+   * The editor is going away (note switch, remount). Ops still in flight, or
+   * buffered behind the in-flight one, would be lost with a plain destroy():
+   * keep listening until the server has acked them (the buffer goes out on
+   * the next ack), then destroy. Gives up if the socket drops or after
+   * RELEASE_TIMEOUT_MS.
+   */
+  release(): void {
+    if (this.state === ClientState.Synchronized) {
+      this.destroy();
+      return;
+    }
+    console.debug(`[OTClient] release docId="${this.docId}", state=${ClientState[this.state]}: waiting for acks`);
+    this.released = true;
+    this.onRemoteOp = () => {};
+    this.onError = undefined;
+    const timer = setTimeout(() => this.destroy(), OTClient.RELEASE_TIMEOUT_MS);
+    this.cleanupFns.push(() => clearTimeout(timer));
   }
 
   /** Get the confirmed shadow (last server-acknowledged content). */
@@ -83,6 +113,7 @@ export class OTClient {
     this.buffer = null;
     this.revision = revision;
     this.confirmedShadow = serverText;
+    this.markIdle();
     if (ops) this.sendOp(ops);
     return text;
   }
@@ -108,6 +139,7 @@ export class OTClient {
       case ClientState.Synchronized:
         this.pending = ops;
         this.state = ClientState.AwaitingConfirm;
+        this.markInFlight();
         console.debug(`[OTClient] Sending op to server docId="${this.docId}", rev=${this.revision}`);
         this.ws.send({ type: 'op', docId: this.docId, ops, rev: this.revision });
         break;
@@ -124,12 +156,15 @@ export class OTClient {
 
   private handleAck(rev: number): void {
     console.debug(`[OTClient] handleAck docId="${this.docId}", newRev=${rev}, state=${ClientState[this.state]}`);
+    // Nothing in flight: the ack is for another client on this doc (one released on a remount)
+    if (this.state === ClientState.Synchronized) return;
     this.revision = rev;
-    if (this.pending) this.confirmedShadow = applyOpsToMarkdown(this.confirmedShadow, this.pending);
+    this.confirmedShadow = applyOpsToMarkdown(this.confirmedShadow, this.pending!);
     switch (this.state) {
       case ClientState.AwaitingConfirm:
         this.pending = null;
         this.state = ClientState.Synchronized;
+        this.markIdle();
         break;
       case ClientState.AwaitingWithBuffer:
         this.pending = this.buffer;
@@ -148,6 +183,20 @@ export class OTClient {
     this.state = ClientState.Synchronized;
     // Invoke error callback so the editor can transition to ERROR state
     this.onError?.(message);
+    this.markIdle();
+  }
+
+  /** An op is in flight: hold the socket's next doc:open until it is acked. */
+  private markInFlight(): void {
+    if (this.settleInFlight) return;
+    this.ws.holdDocOpenUntil(new Promise<void>((resolve) => { this.settleInFlight = resolve; }));
+  }
+
+  /** Nothing of ours is in flight any more (acked, rejected, or the socket died). */
+  private markIdle(): void {
+    this.settleInFlight?.();
+    this.settleInFlight = null;
+    if (this.released) this.destroy();
   }
 
   private handleRemoteOp(ops: OTOperation, rev: number): void {

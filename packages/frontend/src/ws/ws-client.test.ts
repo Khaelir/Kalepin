@@ -57,6 +57,32 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('WSClient doc:open hold', () => {
+  it('sends doc:open only once the edits in flight are acked', async () => {
+    const { client } = connectedClient();
+    const socket = FakeSocket.all[0];
+    let acked!: () => void;
+    client.holdDocOpenUntil(new Promise<void>((resolve) => { acked = resolve; }));
+
+    client.send({ type: 'doc:open', docId: 'b.md' });
+    client.send({ type: 'op', docId: 'a.md', ops: [], rev: 1 });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(socket.sent.map((f) => f.event)).toEqual(['op']);
+
+    acked();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(socket.sent.map((f) => f.event)).toEqual(['op', 'doc:open']);
+  });
+
+  it('does not hold doc:open for long', async () => {
+    const { client } = connectedClient();
+    client.holdDocOpenUntil(new Promise<void>(() => {}));
+    client.send({ type: 'doc:open', docId: 'b.md' });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(FakeSocket.all[0].sent).toContainEqual({ event: 'doc:open', data: { docId: 'b.md' } });
+  });
+});
+
 describe('WSClient heartbeat', () => {
   it('drops a socket that stops answering pings and reconnects', () => {
     const { events } = connectedClient();

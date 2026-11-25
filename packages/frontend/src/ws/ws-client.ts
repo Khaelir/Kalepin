@@ -6,6 +6,7 @@ export class WSClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private docOpenHolds = new Set<Promise<void>>();
   private url: string;
   private token: string;
   private readyResolve: (() => void) | null = null;
@@ -17,6 +18,7 @@ export class WSClient {
   private static readonly RECONNECT_MAX = 30000;
   private static readonly HEARTBEAT_INTERVAL = 30000;
   private static readonly PONG_TIMEOUT = 10000;
+  private static readonly DOC_OPEN_HOLD_MAX = 400;
 
   constructor(token: string) {
     this.token = token;
@@ -87,6 +89,26 @@ export class WSClient {
   }
 
   send(data: unknown): void {
+    if ((data as { type?: unknown }).type === 'doc:open' && this.docOpenHolds.size > 0) {
+      const cap = new Promise<void>((resolve) => setTimeout(resolve, WSClient.DOC_OPEN_HOLD_MAX));
+      void Promise.race([Promise.all(this.docOpenHolds), cap]).then(() => this.sendNow(data));
+      return;
+    }
+    this.sendNow(data);
+  }
+
+  /**
+   * Hold `doc:open` frames until `done` settles (for DOC_OPEN_HOLD_MAX at
+   * most). Once this socket opens another doc the server stops sending it
+   * the ops of the doc it leaves, and closes that doc's session if nobody
+   * else has it open, so edits still in flight there must be acked first.
+   */
+  holdDocOpenUntil(done: Promise<void>): void {
+    this.docOpenHolds.add(done);
+    void done.then(() => this.docOpenHolds.delete(done));
+  }
+
+  private sendNow(data: unknown): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       // NestJS WsAdapter expects { event, data } format for @SubscribeMessage routing
       const { type, ...rest } = data as Record<string, unknown>;

@@ -1159,8 +1159,9 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
     });
 
     return () => {
-      console.debug(`[Editor] OTClient cleanup/destroy for docId="${docId}"`);
-      otClient.destroy();
+      console.debug(`[Editor] OTClient cleanup/release for docId="${docId}"`);
+      // Edits still in flight or buffered keep going until the server acks them
+      otClient.release();
       offAck();
     };
   }, [editor, wsClient, docId, initialRevision]);

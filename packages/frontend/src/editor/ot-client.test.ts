@@ -16,11 +16,20 @@ class FakeWS {
   send(frame: any) {
     this.sent.push(frame);
   }
+  holds: { settled: boolean }[] = [];
+  holdDocOpenUntil(done: Promise<void>) {
+    const hold = { settled: false };
+    this.holds.push(hold);
+    void done.then(() => { hold.settled = true; });
+  }
   emit(type: string, msg: any) {
     for (const h of [...(this.handlers.get(type) ?? [])]) h(msg);
   }
   ops() {
     return this.sent.filter((f) => f.type === 'op');
+  }
+  listeners() {
+    return [...this.handlers.values()].reduce((n, set) => n + set.size, 0);
   }
 }
 
@@ -98,6 +107,68 @@ describe('OTClient.resync (reconnect)', () => {
     expect(ot.resync('abcX!', 2, 'abcX')).toBe('abcX!');
     expect(ws.ops()).toHaveLength(before);
     expect(ot.hasUnackedOps()).toBe(false);
+  });
+});
+
+describe('OTClient.release (editor unmount)', () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it('still sends the buffered edits of the doc being left, then lets go', () => {
+    const { ws, ot } = client('abc', 4);
+    ot.sendOp(edit('abc', 'abcX'));
+    ot.sendOp(edit('abcX', 'abcXY'));
+    ot.release();
+
+    ws.emit('ack', { docId: 'n.md', rev: 5 });
+    expect(ws.ops().at(-1)).toMatchObject({ docId: 'n.md', rev: 5 });
+    expect(applyOpsToMarkdown('abcX', ws.ops().at(-1).ops)).toBe('abcXY');
+    expect(ws.listeners()).toBeGreaterThan(0);
+
+    ws.emit('ack', { docId: 'n.md', rev: 6 });
+    expect(ws.listeners()).toBe(0);
+  });
+
+  it('keeps the buffer right when a collaborator op lands before the ack', () => {
+    const { ws, ot, remote } = client('Hello\n', 0);
+    ot.sendOp(edit('Hello\n', 'Hello!\n'));
+    ot.sendOp(edit('Hello!\n', 'Hello!?\n'));
+    ot.release();
+    ws.emit('op', { docId: 'n.md', ops: edit('Hello\n', 'Intro\nHello\n'), rev: 1 });
+    ws.emit('ack', { docId: 'n.md', rev: 2 });
+    expect(applyOpsToMarkdown('Intro\nHello!\n', ws.ops().at(-1).ops)).toBe('Intro\nHello!?\n');
+    expect(remote).toEqual([]); // nobody to show it to any more
+  });
+
+  it('lets go at once when nothing is in flight, or when the socket drops', () => {
+    const idle = client('abc');
+    idle.ot.release();
+    expect(idle.ws.listeners()).toBe(0);
+
+    const busy = client('abc');
+    busy.ot.sendOp(edit('abc', 'abcX'));
+    busy.ot.release();
+    busy.ws.emit('disconnected', {});
+    expect(busy.ws.listeners()).toBe(0);
+  });
+
+  it('holds the next doc:open while an op is in flight', async () => {
+    const { ws, ot } = client('abc');
+    ot.sendOp(edit('abc', 'abcX'));
+    ot.sendOp(edit('abcX', 'abcXY'));
+    expect(ws.holds).toHaveLength(1);
+    ws.emit('ack', { docId: 'n.md', rev: 1 });
+    await settle();
+    expect(ws.holds[0].settled).toBe(false); // the buffer is in flight now
+    ws.emit('ack', { docId: 'n.md', rev: 2 });
+    await settle();
+    expect(ws.holds[0].settled).toBe(true);
+  });
+
+  it('ignores an ack while nothing is in flight (it belongs to a released client)', () => {
+    const { ws, ot } = client('abc', 3);
+    ws.emit('ack', { docId: 'n.md', rev: 9 });
+    ot.sendOp(edit('abc', 'abcX'));
+    expect(ws.ops().at(-1).rev).toBe(3);
   });
 });
 
