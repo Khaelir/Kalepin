@@ -137,6 +137,16 @@ describe('FilesController history endpoints — access control', () => {
     assert.deepEqual(historyCalls, []);
   });
 
+  it('headings: PIN gate for the owner, 404 without the path for everyone else', async () => {
+    await assert.rejects(controller.getHeadings(ALICE_LOCKED, req(ALICE)), PinLockedException);
+    for (const p of [ALICE_LOCKED, ALICE_NOTE, 'Notes/missing.md']) {
+      await assert.rejects(
+        controller.getHeadings(p, req(BOB)),
+        (e: unknown) => e instanceof NotFoundException && !JSON.stringify(e.getResponse()).includes(p),
+      );
+    }
+  });
+
   it('serves the owner', async () => {
     assert.deepEqual(await controller.getHistory(ALICE_NOTE, req(ALICE)), []);
     assert.deepEqual(await controller.getVersion(ALICE_NOTE, '3', req(ALICE)), { content: 'old', partial: false });

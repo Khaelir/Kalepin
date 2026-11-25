@@ -213,10 +213,12 @@ export class SecureFilesService {
     return { src: input.src, dest: input.dest };
   }
 
+  // The refusals for paths outside the caller's folder never quote the path:
+  // a probe for another user's note gets the same answer whatever it names.
   private assertOwnedNonSecure(p: string, email: string): void {
     const root = personalRootFor(email);
     if (!isCanonicalPath(p) || !isUnderPersonalRoot(p) || !(p === root || p.startsWith(root + '/'))) {
-      throw new ForbiddenException(`path "${p}" is not owned by ${email}`);
+      throw new ForbiddenException('path is not owned by you');
     }
     if (isE2EPath(p)) {
       throw new BadRequestException(`path "${p}" is already in _secure/`);
@@ -226,7 +228,7 @@ export class SecureFilesService {
   private assertOwnedSecure(p: string, email: string): void {
     const root = personalRootFor(email);
     if (!isCanonicalPath(p) || !isUnderPersonalRoot(p) || !(p === root || p.startsWith(root + '/'))) {
-      throw new ForbiddenException(`path "${p}" is not owned by ${email}`);
+      throw new ForbiddenException('path is not owned by you');
     }
     if (!isE2EPath(p)) {
       throw new BadRequestException(`path "${p}" is not under _secure/`);

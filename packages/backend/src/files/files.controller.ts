@@ -228,13 +228,17 @@ export class FilesController {
 
   @Get('headings')
   @RequiredScope('notes:read')
-  async getHeadings(@Query('path') filePath: string, @Req() req: { user: JwtPayload }) {
+  async getHeadings(@Query('path') filePath: string, @Req() req: Request & { user: JwtPayload }) {
     if (!filePath) throw new BadRequestException('path query parameter is required');
+    // Headings are note content: same gates as a read. Like the other routes,
+    // the 404 does not echo the requested path back.
+    await this.filesService.assertReadable(filePath, req.user.email);
+    await this.pinService.assertUnlockedForRequest(req, filePath, req.user.email);
     let content: string;
     try {
       content = await this.filesService.readFile(filePath, req.user.email);
     } catch {
-      throw new NotFoundException(`File not found: ${filePath}`);
+      throw new NotFoundException('File not found');
     }
     const headings: { level: number; text: string }[] = [];
     for (const line of content.split('\n')) {

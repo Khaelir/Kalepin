@@ -166,6 +166,18 @@ describe('SecureFilesService — issueHandoff', () => {
     );
   });
 
+  it('does not echo another user\'s path in the refusal', async () => {
+    const probe = '_users/bob@example.com/_secure/PROBE.md';
+    const refusals = [
+      () => svc.issueHandoff('_users/bob@example.com/PROBE.md', ALICE),
+      () => svc.readSecureBytes(probe, ALICE),
+      () => svc.moveFromSecure({ src: probe, dest: `${ALICE_ROOT}/notes/foo.md`, plaintext: 'x', userEmail: ALICE }),
+    ];
+    for (const refusal of refusals) {
+      await assert.rejects(refusal, (err: Error) => !/PROBE|bob@/.test(err.message));
+    }
+  });
+
   it('rejects a _secure/ path (handoff is for move-INTO only)', async () => {
     inner.files.set(DEST, Buffer.from('opaque-bytes'));
     await assert.rejects(
