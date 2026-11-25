@@ -19,7 +19,13 @@ interface DocumentSession {
   inactivityTimer?: ReturnType<typeof setTimeout>;
   dirty: boolean;
   lastFlushedContent: string;
+  /** Failed flushes in a row, for the retry backoff. */
+  failedFlushes: number;
 }
+
+/** First retry after a failed flush; doubles on each failure up to the cap. */
+const FLUSH_RETRY_MS = 5_000;
+const FLUSH_RETRY_MAX_MS = 60_000;
 
 export class OTSessionManager {
   private readonly logger = new Logger('OTSessionManager');
@@ -63,6 +69,7 @@ export class OTSessionManager {
         clients: new Map(),
         dirty: false,
         lastFlushedContent: initialContent,
+        failedFlushes: 0,
       };
       this.sessions.set(docId, session);
       this.logger.debug(`New session for "${docId}", content length=${initialContent?.length}`);
@@ -165,7 +172,7 @@ export class OTSessionManager {
 
     if (session.clients.size === 0) {
       this.logger.debug(`No clients left for "${docId}", closing session`);
-      this.closeSession(docId);
+      this.closeSessionInBackground(docId);
     }
   }
 
@@ -249,8 +256,28 @@ export class OTSessionManager {
 
     if (session.inactivityTimer) clearTimeout(session.inactivityTimer);
     session.inactivityTimer = setTimeout(() => {
-      this.closeSession(docId);
+      this.closeSessionInBackground(docId);
     }, 5 * 60 * 1000); // 5 minutes
+  }
+
+  /** Retry a failed flush later, backing off while it keeps failing. */
+  private scheduleFlushRetry(docId: string): void {
+    const session = this.sessions.get(docId);
+    if (!session || !session.dirty) return;
+    if (session.flushTimer) clearTimeout(session.flushTimer);
+    const delay = Math.min(FLUSH_RETRY_MS * 2 ** (session.failedFlushes - 1), FLUSH_RETRY_MAX_MS);
+    session.flushTimer = setTimeout(() => {
+      this.flushToDisk(docId).catch(() => {
+        // Logged in flushToDisk, which schedules the next retry
+      });
+    }, delay);
+  }
+
+  /** Timers and disconnects can't await a close; its failures must not escape. */
+  private closeSessionInBackground(docId: string): void {
+    this.closeSession(docId).catch((err) => {
+      this.logger.error(`Closing session "${docId}" failed`, err);
+    });
   }
 
   async flushNow(docId: string): Promise<void> {
@@ -278,6 +305,7 @@ export class OTSessionManager {
       }
       session.dirty = false;
       session.lastFlushedContent = newContent;
+      session.failedFlushes = 0;
 
       // Trim history to sliding window after successful flush
       const historyWindow = 1000;
@@ -288,9 +316,11 @@ export class OTSessionManager {
       // Notify listeners of successful flush
       this.onFlushResult?.(docId, true);
     } catch (err) {
-      // Flush failed — keep dirty so next debounce retries
+      // Flush failed — keep dirty and retry, even if nobody types again
+      session.failedFlushes++;
       this.logger.error(`Flush failed for "${docId}", keeping dirty`, err);
       this.onFlushResult?.(docId, false, String(err));
+      if (this.sessions.get(docId) === session) this.scheduleFlushRetry(docId);
       throw err;
     }
     // Capture diff asynchronously (fire-and-forget)
@@ -316,8 +346,16 @@ export class OTSessionManager {
     if (session.flushTimer) clearTimeout(session.flushTimer);
     if (session.inactivityTimer) clearTimeout(session.inactivityTimer);
 
-    // Final flush
-    await this.flushToDisk(docId);
+    // Final flush. If it fails, keep the session: its edits are not on disk
+    // yet, so it stays in memory to retry, and a client that opens the note
+    // again gets them back.
+    try {
+      await this.flushToDisk(docId);
+    } catch {
+      this.logger.warn(`Final flush failed for "${docId}", keeping the session to retry`);
+      if (this.sessions.get(docId) === session) this.resetInactivityTimer(docId);
+      return;
+    }
 
     // Race guard: a new client may have joined during the async flush
     if (session.clients.size > 0) {
