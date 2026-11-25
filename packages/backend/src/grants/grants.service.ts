@@ -17,11 +17,21 @@ export type ActiveGrant = DocumentGrant;
 @Injectable()
 export class GrantsService {
   private readonly logger = new Logger(GrantsService.name);
+  private readonly changeListeners: Array<(path: string) => void> = [];
 
   constructor(
     @InjectRepository(DocumentGrant)
     private readonly repo: Repository<DocumentGrant>,
   ) {}
+
+  /** `listener` gets a grant's path after the grant is revoked or its permission or expiry changes. */
+  onChange(listener: (path: string) => void): void {
+    this.changeListeners.push(listener);
+  }
+
+  private changed(path: string): void {
+    for (const listener of this.changeListeners) listener(path);
+  }
 
   async mint(input: MintInput): Promise<DocumentGrant> {
     // Upsert on (path, granteeEmail) when an active grant already exists.
@@ -37,7 +47,9 @@ export class GrantsService {
     if (existing) {
       existing.permission = input.permission;
       existing.expiresAt = input.expiresAt ?? null;
-      return this.repo.save(existing);
+      const saved = await this.repo.save(existing);
+      this.changed(existing.path);
+      return saved;
     }
     const row = this.repo.create({
       grantorEmail: input.grantorEmail,
@@ -56,7 +68,9 @@ export class GrantsService {
     if (!row) return null;
     if (row.revokedAt !== null) return row;
     row.revokedAt = now;
-    return this.repo.save(row);
+    const saved = await this.repo.save(row);
+    this.changed(row.path);
+    return saved;
   }
 
   async findById(id: number): Promise<DocumentGrant | null> {
@@ -69,7 +83,9 @@ export class GrantsService {
     if (!row || row.revokedAt !== null) return null;
     if (patch.permission !== undefined) row.permission = patch.permission;
     if (patch.expiresAt !== undefined) row.expiresAt = patch.expiresAt;
-    return this.repo.save(row);
+    const saved = await this.repo.save(row);
+    this.changed(row.path);
+    return saved;
   }
 
   /** Active grants for a path — used by the per-note share panel. */

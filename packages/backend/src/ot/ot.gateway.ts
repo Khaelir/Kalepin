@@ -7,7 +7,7 @@ import {
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
-import { UseGuards, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
+import { UseGuards, Inject, Logger, OnModuleDestroy, Optional, forwardRef } from '@nestjs/common';
 import * as WebSocket from 'ws';
 import { Server } from 'ws';
 import { IncomingMessage } from 'http';
@@ -36,6 +36,7 @@ import { AccessLogService } from '../access-log/access-log.service';
 import { DocHandlesService } from '../doc-handles/doc-handles.service';
 import { PinService } from '../pin/pin.service';
 import { NotificationInboxService } from '../notifications/notification-inbox.service';
+import { GrantsService } from '../grants/grants.service';
 
 interface AuthenticatedWebSocket extends WebSocket {
   user?: JwtPayload;
@@ -58,8 +59,11 @@ const MOVED_ALIAS_TTL_MS = 30_000;
  */
 const EXTERNAL_UNLINK_SETTLE_MS = 1_000;
 
+/** How often grantees in live sessions are re-checked, for grants that expire. */
+const GRANT_RECHECK_MS = 30_000;
+
 @WebSocketGateway({ path: '/ws' })
-export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   private readonly logger = new Logger(OTGateway.name);
 
   @WebSocketServer()
@@ -77,6 +81,8 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
    */
   private movedDocIds = new Map<string, { to: string; expiresAt: number }>();
 
+  private grantRecheck?: ReturnType<typeof setInterval>;
+
   constructor(
     private readonly otService: OTService,
     private readonly authService: AuthService,
@@ -89,7 +95,16 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly pinService: PinService,
     @Optional() @Inject(forwardRef(() => LinkIndexService)) private readonly linkIndexService?: LinkIndexService,
     @Optional() private readonly notificationInbox?: NotificationInboxService,
+    @Optional() private readonly grants?: GrantsService,
   ) {
+    // A grantee keeps receiving live edits only while their grant lets them
+    // open the doc: re-check when a grant changes, and now and then for
+    // grants that simply expired.
+    if (this.grants) {
+      this.grants.onChange((path) => this.revalidateClientsUnder(path));
+      this.grantRecheck = setInterval(() => this.revalidateGranteeClients(), GRANT_RECHECK_MS);
+      this.grantRecheck.unref?.();
+    }
     // Wire OT broadcast so rename-rewriting can push ops to clients
     this.linkIndexService?.setOTBroadcast((docId, ops, rev) => {
       this.broadcastToDocClients(docId, {
@@ -605,6 +620,60 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       cursor: data.cursor,
       selection: data.selection,
     }, client);
+  }
+
+  onModuleDestroy(): void {
+    if (this.grantRecheck) clearInterval(this.grantRecheck);
+  }
+
+  /** A grant on `path` changed: re-check the clients of the sessions it covers. */
+  private revalidateClientsUnder(path: string): void {
+    for (const docId of this.otService.sessionManager.sessionIdsAtOrUnder(path)) {
+      this.revalidateDocClients(docId).catch((err) => {
+        this.logger.error(`Failed to re-check the clients of "${docId}"`, err);
+      });
+    }
+  }
+
+  /** Grants only open other users' personal notes: re-check the clients of those. */
+  private revalidateGranteeClients(): void {
+    for (const { docId } of this.otService.sessionManager.getActiveSessions()) {
+      if (!isUnderPersonalRoot(docId)) continue;
+      this.revalidateDocClients(docId).catch((err) => {
+        this.logger.error(`Failed to re-check the clients of "${docId}"`, err);
+      });
+    }
+  }
+
+  /**
+   * Apply the doc:open gate again to every client of `docId`. A grantee
+   * whose grant was revoked, expired or lowered to read is removed from the
+   * session (no more ops or presence) and gets the error frame doc:open
+   * would have sent.
+   */
+  private async revalidateDocClients(docId: string): Promise<void> {
+    const clients = this.otService.sessionManager.getClients(docId);
+    for (const [ws, info] of clients ? [...clients] : []) {
+      const v = await this.visibility.visibilityFor(docId, info.email.toLowerCase());
+      if (v.kind === 'owner' || (v.kind === 'grant' && v.permission !== 'read')) continue;
+      this.evictClient(docId, ws as AuthenticatedWebSocket, v.kind === 'grant' ? 'forbidden' : 'not_found');
+    }
+  }
+
+  private evictClient(docId: string, client: AuthenticatedWebSocket, code: 'forbidden' | 'not_found'): void {
+    if (!this.isJoined(client, docId)) return;
+    this.logger.log(`Removing ${client.user?.email} from "${docId}": access revoked`);
+    this.otService.sessionManager.removeClient(docId, client);
+    if (client.docId === docId) client.docId = undefined;
+    client.openedDocs?.delete(docId);
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({ type: 'error', code, docId }));
+    }
+    this.broadcastToDocClients(docId, {
+      type: 'presence:leave',
+      docId,
+      userId: String(client.user?.sub),
+    });
   }
 
   /** True when `client` is in the live session of `docId`, i.e. passed its doc:open. */
