@@ -329,6 +329,35 @@ describe('ShareLinksController.revoke — creator-only gate', () => {
     assert.deepEqual(result, { ok: true });
   });
 
+  it('personal-folder owner can revoke a link a write grantee made on her note', async () => {
+    const stub = new StubService();
+    stub.infoForGone = {
+      path: '_users/alice@example.com/diary.md',
+      createdByEmail: 'bob@example.com',
+    };
+    const ctrl = makeCtrl(stub);
+    const result = await ctrl.revoke('CODE000001', makeReq('alice@example.com'));
+    assert.deepEqual(result, { ok: true });
+    assert.ok(stub.calls.find((c) => c.method === 'revoke'));
+  });
+
+  it('another user\'s link on a shared-vault note stays with its creator', async () => {
+    const stub = new StubService();
+    stub.infoForGone = {
+      path: 'Notes/team.md',
+      createdByEmail: 'bob@example.com',
+    };
+    const ctrl = makeCtrl(stub);
+    await assert.rejects(() => ctrl.revoke('CODE000001', makeReq('alice@example.com')), ForbiddenException);
+    // A look-alike folder name is not Alice's folder.
+    stub.infoForGone = {
+      path: '_users/alice@example.com.evil/diary.md',
+      createdByEmail: 'bob@example.com',
+    };
+    await assert.rejects(() => ctrl.revoke('CODE000001', makeReq('alice@example.com')), ForbiddenException);
+    assert.equal(stub.calls.find((c) => c.method === 'revoke'), undefined);
+  });
+
   it('returns 404 when the code does not exist', async () => {
     const stub = new StubService();
     stub.infoForGone = null;
@@ -521,6 +550,18 @@ describe('ShareLinksController.updateLink — PATCH gating', () => {
       () => ctrl.updateLink('CODE001', { allow_guest_comments: true }, bob),
       ForbiddenException,
     );
+  });
+
+  it('personal-folder owner can flip the flag on a grantee\'s link to her note', async () => {
+    const stub = new StubService();
+    stub.infoForGone = {
+      path: '_users/alice@example.com/diary.md',
+      createdByEmail: 'bob@example.com',
+    };
+    const ctrl = makeCtrl(stub);
+    const result = await ctrl.updateLink('CODE001', { allow_guest_comments: false }, makeReq('alice@example.com'));
+    assert.deepEqual(result, { ok: true });
+    assert.ok(stub.calls.find((c) => c.method === 'setAllowGuestComments'));
   });
 
   it('admin can flip the flag on a link they did not create', async () => {
