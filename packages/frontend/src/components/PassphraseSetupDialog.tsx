@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { decodeVaultMetaWire, regenerateRecovery, setupVault, type VaultMeta } from '../crypto/master-kek';
+import { decodeVaultMetaWire, regenerateRecovery, type VaultMeta } from '../crypto/master-kek';
+import { createVault } from '../crypto/vault-setup';
 import {
   evaluateSetupGate,
   type RecoveryChoice,
@@ -63,10 +64,11 @@ export function PassphraseSetupDialog({ onComplete, onCancel }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const { meta } = await setupVault(passphrase);
-      await api.putVaultMeta({
-        passphrase_wrapped_kek: bytesToBase64(meta.passphrase_wrapped_kek),
-        passphrase_salt: bytesToBase64(meta.passphrase_salt),
+      const meta = await createVault(passphrase, async (m) => {
+        await api.putVaultMeta({
+          passphrase_wrapped_kek: bytesToBase64(m.passphrase_wrapped_kek),
+          passphrase_salt: bytesToBase64(m.passphrase_salt),
+        });
       });
       if (recovery === 'generate') {
         const phrase = generateRecoveryPhrase();
@@ -100,6 +102,7 @@ export function PassphraseSetupDialog({ onComplete, onCancel }: Props) {
               passphrase_salt: bytesToBase64(meta.passphrase_salt),
               recovery_wrapped_kek: bytesToBase64(r.recovery_wrapped_kek),
               recovery_salt: bytesToBase64(r.recovery_salt),
+              expected_passphrase_wrapped_kek: bytesToBase64(meta.passphrase_wrapped_kek),
             });
             onComplete(true);
           } catch (err) {

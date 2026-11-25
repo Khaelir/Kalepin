@@ -144,6 +144,7 @@ export function SecuritySettings({ userEmail }: Props) {
                 await api.putVaultMeta({
                   passphrase_wrapped_kek: bytesToBase64(r.passphrase_wrapped_kek),
                   passphrase_salt: bytesToBase64(r.passphrase_salt),
+                  expected_passphrase_wrapped_kek: bytesToBase64(meta.passphrase_wrapped_kek),
                 });
                 clearRecoveryUnlockPending();
                 setInfo('Passphrase changed. Per-file envelopes were not rewritten.');
@@ -236,6 +237,7 @@ export function SecuritySettings({ userEmail }: Props) {
                     passphrase_salt: bytesToBase64(meta.passphrase_salt),
                     recovery_wrapped_kek: bytesToBase64(r.recovery_wrapped_kek),
                     recovery_salt: bytesToBase64(r.recovery_salt),
+                    expected_passphrase_wrapped_kek: bytesToBase64(meta.passphrase_wrapped_kek),
                   });
                   setInfo('Recovery phrase regenerated. The old phrase no longer works.');
                   setMode({ kind: 'idle' });
