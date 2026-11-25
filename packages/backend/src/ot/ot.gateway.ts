@@ -575,6 +575,8 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: { docId: string },
   ) {
     if (!client.user) return;
+    // Only a socket in the doc's session may force a save of it.
+    if (!this.isJoined(client, data.docId)) return;
     try {
       await this.otService.sessionManager.flushNow(data.docId);
       // The flushResultHandler already broadcasts to all clients;
@@ -591,6 +593,9 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: { docId: string; cursor: number | null; selection: unknown },
   ) {
     if (!client.user) return;
+    // Only a socket in the doc's session may announce itself there; anyone
+    // else could push their email and a selection into a private note.
+    if (!this.isJoined(client, data.docId)) return;
 
     this.broadcastToDocClients(data.docId, {
       type: 'presence',
@@ -600,6 +605,11 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       cursor: data.cursor,
       selection: data.selection,
     }, client);
+  }
+
+  /** True when `client` is in the live session of `docId`, i.e. passed its doc:open. */
+  private isJoined(client: AuthenticatedWebSocket, docId: string): boolean {
+    return !!this.otService.sessionManager.getClients(docId)?.has(client);
   }
 
   private broadcastToDocClients(docId: string, message: unknown, exclude?: WebSocket): void {

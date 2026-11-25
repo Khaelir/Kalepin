@@ -76,3 +76,52 @@ describe('OTGateway op frames', () => {
     assert.deepEqual(ws.sent, [{ type: 'error', docId: 'a.md', message: 'Operation rejected' }]);
   });
 });
+
+describe('OTGateway presence and doc:flush frames', () => {
+  // Any logged-in user could broadcast presence (their email and any
+  // selection) into another user's private session, or force a flush of any
+  // open session, by naming its doc id.
+  const PRIVATE = '_users/alice@example.com/diary.md';
+
+  async function aliceEditing(): Promise<FakeSocket> {
+    await storage.write(PRIVATE, 'dear diary');
+    const alice = fakeSocket('alice@example.com', 1);
+    await gateway.handleDocOpen(alice as any, { docId: PRIVATE });
+    alice.sent = [];
+    return alice;
+  }
+
+  it('ignores presence from a socket that has not joined the doc', async () => {
+    const alice = await aliceEditing();
+    const mallory = fakeSocket('mallory@example.com', 2);
+
+    gateway.handlePresence(mallory as any, { docId: PRIVATE, cursor: 3, selection: { from: 0, to: 4 } });
+
+    assert.deepEqual(alice.sent, []);
+  });
+
+  it('still relays presence between sockets in the session', async () => {
+    const alice = await aliceEditing();
+    const tab2 = fakeSocket('alice@example.com', 1);
+    await gateway.handleDocOpen(tab2 as any, { docId: PRIVATE });
+    alice.sent = [];
+
+    gateway.handlePresence(tab2 as any, { docId: PRIVATE, cursor: 3, selection: null });
+
+    assert.equal(alice.sent.length, 1);
+    assert.equal(alice.sent[0].type, 'presence');
+  });
+
+  it('ignores doc:flush from a socket that has not joined the doc', async () => {
+    const alice = await aliceEditing();
+    await gateway.handleOp(alice as any, { docId: PRIVATE, ops: [{ type: 'retain', count: 10 }, { type: 'insert', text: '!' }], rev: 0 });
+    const mallory = fakeSocket('mallory@example.com', 2);
+
+    await gateway.handleDocFlush(mallory as any, { docId: PRIVATE });
+
+    assert.deepEqual(mallory.sent, []);
+    assert.equal(await storage.read(PRIVATE), 'dear diary', 'not flushed');
+    await gateway.handleDocFlush(alice as any, { docId: PRIVATE });
+    assert.equal(await storage.read(PRIVATE), 'dear diary!');
+  });
+});
