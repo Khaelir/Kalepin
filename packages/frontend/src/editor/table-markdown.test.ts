@@ -1,0 +1,134 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Editor, type JSONContent } from '@tiptap/core';
+import StarterKit from '@tiptap/starter-kit';
+import Link from '@tiptap/extension-link';
+import { TableRow } from '@tiptap/extension-table-row';
+import { TableCell } from '@tiptap/extension-table-cell';
+import { TableHeader } from '@tiptap/extension-table-header';
+import { Markdown } from 'tiptap-markdown';
+import { TableWithMarkdown } from './table-markdown';
+import { WikilinkNode } from './extensions/wikilink-node';
+import { MentionNode } from './extensions/mention-node';
+import { ImageWithAttachments } from './image-extension';
+
+// Image node views fetch attachments from the API; keep them pending so the
+// tests never touch the network.
+vi.mock('../api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api')>()),
+  fetchImageBlob: () => new Promise<string>(() => {}),
+}));
+
+const editors: Editor[] = [];
+
+afterEach(() => {
+  while (editors.length) editors.pop()!.destroy();
+});
+
+/** An editor with the extensions that take part in table markdown, as in Editor.tsx. */
+function createEditor(markdown: string): Editor {
+  const editor = new Editor({
+    extensions: [
+      StarterKit.configure({ codeBlock: false, link: false }),
+      Link.configure({ openOnClick: false }),
+      TableWithMarkdown,
+      TableRow,
+      TableCell,
+      TableHeader,
+      Markdown,
+      WikilinkNode,
+      ImageWithAttachments,
+      MentionNode,
+    ],
+    content: markdown,
+  });
+  editors.push(editor);
+  return editor;
+}
+
+function getMarkdown(editor: Editor): string {
+  return (editor.storage as any).markdown.getMarkdown();
+}
+
+/** A two-column table with an `a | b` header and the given body rows. */
+function table(...rows: string[]): string {
+  return ['| a | b |', '| --- | --- |', ...rows].join('\n') + '\n';
+}
+
+describe('table markdown round-trip', () => {
+  it.each([
+    ['plain cells', table('| 1 | 2 |'), table('| 1 | 2 |')],
+    ['empty cells', table('|  | y |'), table('|  | y |')],
+    ['a wikilink-only cell', table('| [[Roadmap]] | x |'), table('| [[Roadmap]] | x |')],
+    ['a wikilink-only header cell', '| [[Roadmap]] | b |\n| --- | --- |\n| 1 | 2 |\n', '| [[Roadmap]] | b |\n| --- | --- |\n| 1 | 2 |\n'],
+    ['a mention-only cell', table('| @[bob](bob@x.com) | x |'), table('| @[bob](bob@x.com) | x |')],
+    ['an escaped | in text', table('| x 1\\|2 | y |'), table('| x 1\\|2 | y |')],
+    ['a backslash before an escaped |', table('| a\\\\\\|b | y |'), table('| a\\\\\\|b | y |')],
+    ['inline code containing |', table('| `a\\|b` | y |'), table('| `a\\|b` | y |')],
+    ['an aliased wikilink written [[target\\|alias]]', table('| [[Roadmap\\|the map]] | x |'), table('| [[Roadmap\\|the map]] | x |')],
+    // The bare spelling, as saved by earlier versions, is read as one cell and saved escaped.
+    ['an aliased wikilink written [[target|alias]]', table('| [[Roadmap|the map]] | x |'), table('| [[Roadmap\\|the map]] | x |')],
+    ['an aliased wikilink in a header cell', '| [[Roadmap|the map]] | b |\n| --- | --- |\n| 1 | 2 |\n', '| [[Roadmap\\|the map]] | b |\n| --- | --- |\n| 1 | 2 |\n'],
+    ['inline code holding wikilink syntax', table('| `[[a|b]]` | 2 |'), table('| `[[a\\|b]]` | 2 |')],
+    ['inline code holding escaped wikilink syntax', table('| `[[a\\|b]]` | 2 |'), table('| `[[a\\|b]]` | 2 |')],
+    ['an image-only cell', table('| ![](_attachments/a.png) | y |'), table('| ![](_attachments/a.png) | y |')],
+    ['an image with alt text and a title', table('| ![chart](_attachments/a.png "Q3") | y |'), table('| ![chart](_attachments/a.png "Q3") | y |')],
+    ['an image with | in its alt text', table('| ![a\\|b](_attachments/a.png) | y |'), table('| ![a\\|b](_attachments/a.png) | y |')],
+    ['text around an image', table('| x ![](_attachments/a.png) y | 2 |'), table('| x ![](_attachments/a.png) y | 2 |')],
+    ['two images in a cell', table('| ![](_attachments/a.png) ![](_attachments/b.png) | 2 |'), table('| ![](_attachments/a.png) ![](_attachments/b.png) | 2 |')],
+  ])('keeps %s', (_name, input, expected) => {
+    const editor = createEditor(input);
+    const output = getMarkdown(editor);
+    expect(output).toBe(expected);
+    // Reloading what was saved gives back the same document.
+    expect(createEditor(output).getJSON()).toEqual(editor.getJSON());
+  });
+
+  it('escapes a | typed into a cell so it does not split the row', () => {
+    const editor = createEditor(table('| x | y |'));
+    let end = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.isText && node.text === 'x') end = pos + node.nodeSize;
+    });
+    editor.view.dispatch(editor.state.tr.insertText(' 1|2', end));
+
+    const output = getMarkdown(editor);
+    expect(output).toBe(table('| x 1\\|2 | y |'));
+    // Compare the table only: the edit also made StarterKit append a trailing paragraph.
+    expect(createEditor(output).getJSON().content?.[0]).toEqual(editor.getJSON().content?.[0]);
+  });
+
+  it('reads a bare [[target|alias]] in a row as an aliased wikilink', () => {
+    const doc: JSONContent = createEditor(table('| [[Roadmap|the map]] | x |')).getJSON();
+    const cells = doc.content?.[0].content?.[1].content;
+    expect(cells?.[0].content?.[0].content).toEqual([
+      { type: 'wikilink', attrs: { target: 'Roadmap', alias: 'the map' } },
+    ]);
+    expect(cells?.[1].content?.[0].content).toEqual([{ type: 'text', text: 'x' }]);
+  });
+
+  it('leaves pipes outside wikilinks as cell separators', () => {
+    const editor = createEditor(table('| [[A|a]] 1|2 |'));
+    expect(getMarkdown(editor)).toBe(table('| [[A\\|a]] 1 | 2 |'));
+  });
+
+  it('still saves a table as HTML when a cell holds paragraphs markdown cannot keep apart', () => {
+    const paragraph = (text: string) => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+    const editor = createEditor('');
+    editor.commands.setContent({
+      type: 'doc',
+      content: [{
+        type: 'table',
+        content: [
+          { type: 'tableRow', content: [{ type: 'tableHeader', content: [paragraph('a')] }] },
+          { type: 'tableRow', content: [{ type: 'tableCell', content: [paragraph('one'), paragraph('two')] }] },
+        ],
+      }],
+    });
+    expect(getMarkdown(editor)).toMatch(/^<table/);
+  });
+
+  it('leaves aliased wikilinks outside tables as they are', () => {
+    expect(getMarkdown(createEditor('See [[Roadmap|the map]] | done'))).toBe('See [[Roadmap|the map]] | done');
+  });
+});

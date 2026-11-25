@@ -12,6 +12,58 @@ export interface WikilinkNodeOptions {
   onNavigate: (path: string, heading?: string) => void;
 }
 
+const WIKILINK_IN_SOURCE = /\[\[[^\]\n]*\]\]/g;
+const tablePatched = new WeakSet<object>();
+
+/**
+ * Make markdown-it's table rule read `[[target|alias]]` as part of one cell.
+ * Inside tables the table serializer writes `[[target\|alias]]`, as GFM and
+ * Obsidian expect, but notes saved by earlier versions (or written by hand)
+ * hold the bare pipe, which split the cell and lost the row's last cell on
+ * the next save.
+ *
+ * The table rule runs on a copy of the source in which bare pipes inside
+ * `[[...]]` are replaced by NUL (escaped ones are left to the rule, which
+ * already unescapes them). The copy has the same length, so line offsets stay
+ * valid, and markdown-it has already turned any real NUL into U+FFFD. The
+ * cells the rule produces get their pipes back before inline parsing.
+ */
+function allowWikilinkPipesInTables(md: any) {
+  if (tablePatched.has(md)) return;
+  // markdown-it has no public way to read a rule back, hence __rules__.
+  const rule = md.block.ruler.__rules__.find((r: { name: string }) => r.name === 'table');
+  if (!rule) return;
+  tablePatched.add(md);
+  const table = rule.fn;
+  // One block state per parse; the rule runs for every line, so mask once.
+  const maskedSources = new WeakMap<object, string | null>();
+  const tableWithWikilinks = (state: any, startLine: number, endLine: number, silent: boolean) => {
+    let masked = maskedSources.get(state);
+    if (masked === undefined) {
+      const src: string = state.src;
+      const replaced = src.replace(WIKILINK_IN_SOURCE, (link) =>
+        link.replace(/\\?\|/g, (pipe) => (pipe === '|' ? '\0' : pipe)),
+      );
+      masked = replaced === src ? null : replaced;
+      maskedSources.set(state, masked);
+    }
+    if (masked === null) return table(state, startLine, endLine, silent);
+    const src = state.src;
+    const firstToken = state.tokens.length;
+    state.src = masked;
+    try {
+      return table(state, startLine, endLine, silent);
+    } finally {
+      state.src = src;
+      for (let i = firstToken; i < state.tokens.length; i++) {
+        const token = state.tokens[i];
+        if (token.type === 'inline') token.content = token.content.replace(/\0/g, '|');
+      }
+    }
+  };
+  md.block.ruler.at('table', tableWithWikilinks, { alt: rule.alt });
+}
+
 export const WikilinkNode = Node.create<WikilinkNodeOptions>({
   name: 'wikilink',
   group: 'inline',
@@ -78,6 +130,9 @@ export const WikilinkNode = Node.create<WikilinkNodeOptions>({
           }
         },
         parse: {
+          setup(markdownit: any) {
+            allowWikilinkPipesInTables(markdownit);
+          },
           // Hook into tiptap-markdown's DOM post-processing to convert
           // [[...]] text in the parsed HTML into <span data-type="wikilink"> elements.
           updateDOM(element: HTMLElement) {
