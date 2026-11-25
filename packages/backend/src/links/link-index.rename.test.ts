@@ -109,6 +109,20 @@ describe('LinkIndexService — rename link rewriting', () => {
     assert.deepEqual(broadcasts, ['notes/index.md']);
   });
 
+  it('rewrites links in table cells, keeping their escaped alias pipe', async () => {
+    const table = '| Doc | Notes |\n| --- | --- |\n| [[Plan\\|the plan]] | [[Plan#Goals\\|goals]], [[Planning\\|other]] |';
+    await save('notes/index.md', table);
+    assert.deepEqual(await targetsFrom('notes/index.md'), ['notes/Plan.md', 'notes/Plan.md', 'notes/Planning.md']);
+
+    await rename('notes/Plan.md', 'notes/Roadmap.md');
+
+    assert.equal(
+      files.get('notes/index.md'),
+      '| Doc | Notes |\n| --- | --- |\n| [[Roadmap\\|the plan]] | [[Roadmap#Goals\\|goals]], [[Planning\\|other]] |',
+    );
+    assert.deepEqual(await targetsFrom('notes/index.md'), ['notes/Roadmap.md', 'notes/Roadmap.md', 'notes/Planning.md']);
+  });
+
   it('keeps path-style links pointing at a note moved to another folder', async () => {
     await save('notes/index.md', 'See [[Plan]], [[notes/Plan#Goals]] and [x](Plan.md).');
     await save('other/list.md', 'See [p](../notes/Plan.md).');

@@ -33,8 +33,9 @@ export function parseLinksFromMarkdown(content: string): ParsedLink[] {
       const inner = match[1];
       // Skip external URLs inside wikilinks
       if (inner.startsWith('http://') || inner.startsWith('https://')) continue;
-      // Extract target (before pipe for aliases, strip #heading fragment)
-      let rawTarget = inner.split('|')[0].trim();
+      // Extract target (before pipe for aliases, strip #heading fragment). In a
+      // table cell the pipe is escaped: [[target\|alias]].
+      let rawTarget = inner.split(/\\?\|/)[0].trim();
       const hashIdx = rawTarget.indexOf('#');
       if (hashIdx >= 0) rawTarget = rawTarget.substring(0, hashIdx).trim();
       // Empty rawTarget means same-page link like [[#Heading]] — stored with empty target,

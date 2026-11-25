@@ -106,6 +106,11 @@ Also [ref](other.md)`;
     assert.equal(links[0].rawTarget, 'Architecture');
   });
 
+  it('reads the escaped alias pipe of a link in a table cell', () => {
+    const links = parseLinksFromMarkdown('| [[Meeting Notes\\|notes]] | [[docs/Architecture#API\\|API]] |');
+    assert.deepEqual(links.map((l) => l.rawTarget), ['Meeting Notes', 'docs/Architecture']);
+  });
+
   it('handles heading with path [[dir/Page#Heading]]', () => {
     const links = parseLinksFromMarkdown('See [[docs/Architecture#API Design]]');
     assert.equal(links.length, 1);
