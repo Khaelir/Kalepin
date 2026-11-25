@@ -1,3 +1,4 @@
+import 'reflect-metadata';
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import {
@@ -6,8 +7,11 @@ import {
   ForbiddenException,
   GoneException,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { ShareLinksController } from './share-links.controller';
 import { isVisibleTo } from '../auth/visibility';
+import { CombinedAuthGuard } from '../auth/combined-auth.guard';
+import { REQUIRED_SCOPE_KEY } from '../auth/required-scope.decorator';
 
 interface StubServiceCall {
   method: string;
@@ -398,6 +402,32 @@ describe('ShareLinksController.create — write-permission gate', () => {
       ForbiddenException,
     );
     assert.equal(stub.calls.length, 0, 'service must NOT be called when assertWritableBy fails');
+  });
+});
+
+describe('ShareLinksController.create — key scope', () => {
+  function guardContext(handler: Function, req: any) {
+    return {
+      switchToHttp: () => ({ getRequest: () => req, getResponse: () => null }),
+      getHandler: () => handler,
+    } as any;
+  }
+
+  it('a read-only API key or OAuth token cannot publish a note', async () => {
+    const authService = {
+      verifyApiKey: async () => ({ sub: 1, email: 'alice@example.com', scope: 'ro', apiKeyId: 1 }),
+    } as any;
+    const guard = new CombinedAuthGuard(authService, new Reflector());
+    const create = ShareLinksController.prototype.create;
+    await assert.rejects(
+      () => guard.canActivate(guardContext(create, { headers: { authorization: 'Bearer kp_readonly' } })),
+      ForbiddenException,
+    );
+    // Same permission as the other mutating share-link routes.
+    assert.equal(
+      Reflect.getMetadata(REQUIRED_SCOPE_KEY, create),
+      Reflect.getMetadata(REQUIRED_SCOPE_KEY, ShareLinksController.prototype.revoke),
+    );
   });
 });
 

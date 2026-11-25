@@ -104,7 +104,9 @@ export class ShareLinksController {
 
   @Post()
   @UseGuards(CombinedAuthGuard)
-  @RequiredScope('notes:read')
+  // Publishing is a write, like revoking: a read-only key must not be able to
+  // expose a note, and the link would outlive the key.
+  @RequiredScope('notes:edit')
   async create(
     @Body() body: {
       path: string;
