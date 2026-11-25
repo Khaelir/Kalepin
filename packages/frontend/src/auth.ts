@@ -1,3 +1,6 @@
+import { clearRecentFiles } from './utils/recent-files';
+import { clearRecoveryUnlockPending } from './crypto/recovery-pending';
+
 const TOKEN_KEY = 'kalepin_token';
 
 export function getToken(): string | null {
@@ -12,10 +15,36 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+/** The user id (`sub`) in a session JWT — the stored one by default — or null if there is none or it can't be read. */
+export function getTokenUserId(token: string | null = getToken()): string | null {
+  if (!token) return null;
+  try {
+    const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const sub = (JSON.parse(atob(payload)) as { sub?: unknown }).sub;
+    return typeof sub === 'number' || typeof sub === 'string' ? String(sub) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Forget the per-user state this browser keeps in localStorage — recently
+ * opened note paths and the recovery-unlock flag — so the next account to
+ * sign in here doesn't inherit it. The cached Encrypted Folder key lives in
+ * IndexedDB; `clearSession()` (session.ts) drops that too.
+ */
+export function clearLocalUserState(): void {
+  clearRecentFiles();
+  clearRecoveryUnlockPending();
+}
+
 export function checkTokenFromUrl(): string | null {
   const params = new URLSearchParams(window.location.search);
   const token = params.get('token');
   if (token) {
+    // Signing in as someone else (or after a sign-out that left state
+    // behind) must not show this account the previous one's recent notes.
+    if (getTokenUserId(getToken()) !== getTokenUserId(token)) clearLocalUserState();
     setToken(token);
     // Clean token from URL but preserve the path and hash
     params.delete('token');

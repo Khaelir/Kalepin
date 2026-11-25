@@ -9,11 +9,16 @@ vi.mock('idb-keyval', () => ({
   del: async (k: string) => { store.delete(k); },
 }));
 
+// The signed-in user, as read from the session token.
+let signedIn: string | null = '1';
+vi.mock('../auth', () => ({ getTokenUserId: () => signedIn }));
+
 const { cacheMasterKek, loadCachedMasterKek, clearCachedMasterKek } = await import('./key-store');
 
 describe('key-store', () => {
   beforeEach(() => {
     store.clear();
+    signedIn = '1';
   });
 
   async function genPair(extractable: boolean) {
@@ -58,5 +63,37 @@ describe('key-store', () => {
     store.set('e2e-master-kek/v1', { not: 'a key' });
     expect(await loadCachedMasterKek()).toBeUndefined();
     expect(store.has('e2e-master-kek/v1')).toBe(false);
+  });
+
+  it("never hands one account's key to another account signed in on the same browser", async () => {
+    const k = await genPair(false);
+    await cacheMasterKek(k);
+    signedIn = '2';
+    expect(await loadCachedMasterKek()).toBeUndefined();
+    // …and the other account's key is gone, not just hidden.
+    signedIn = '1';
+    expect(await loadCachedMasterKek()).toBeUndefined();
+    expect(store.has('e2e-master-kek/v1')).toBe(false);
+  });
+
+  it('wipes a key cached before keys were tied to their user', async () => {
+    const k = await genPair(false);
+    store.set('e2e-master-kek/v1', { wrap: k.wrap, hmac: k.hmac });
+    expect(await loadCachedMasterKek()).toBeUndefined();
+    expect(store.has('e2e-master-kek/v1')).toBe(false);
+  });
+
+  it('hands out nothing when nobody is signed in', async () => {
+    const k = await genPair(false);
+    await cacheMasterKek(k);
+    signedIn = null;
+    expect(await loadCachedMasterKek()).toBeUndefined();
+  });
+
+  it('refuses to cache a key without a signed-in user', async () => {
+    const k = await genPair(false);
+    signedIn = null;
+    await expect(cacheMasterKek(k)).rejects.toThrow(/signed-in user/);
+    expect(store.size).toBe(0);
   });
 });

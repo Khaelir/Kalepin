@@ -1,4 +1,5 @@
-import { authHeaders, clearToken } from './auth';
+import { authHeaders } from './auth';
+import { clearSession } from './session';
 import { isE2EEncrypted } from './crypto/path-predicates';
 import { markSelfSaved } from './self-saved-paths';
 import type { FileEntry, CommentThread } from '@kalepin/shared';
@@ -10,8 +11,7 @@ const baseHeaders = () => ({
 
 function checkAuth(res: Response): Response {
   if (res.status === 401) {
-    clearToken();
-    window.location.reload();
+    void clearSession().finally(() => window.location.reload());
   }
   return res;
 }
