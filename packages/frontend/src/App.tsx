@@ -9,6 +9,7 @@ import { MoveFromSecureDialog } from './components/MoveFromSecureDialog';
 import { PassphraseSetupDialog } from './components/PassphraseSetupDialog';
 import { PassphrasePromptDialog } from './components/PassphrasePromptDialog';
 import { loadCachedMasterKek } from './crypto/key-store';
+import { secureFolderAction } from './crypto/vault-status';
 import { isE2EEncrypted, prettifyPath } from './crypto/path-predicates';
 import { SECURE_FOLDER_ENABLED } from './feature-flags';
 import { consumeSelfSaved } from './self-saved-paths';
@@ -574,14 +575,19 @@ export function App() {
     // (background refresh hasn't landed yet, or another browser tab just
     // completed setup). Without this the dialog mis-routes to "Set up" for a
     // user whose vault already exists on the server.
-    let meta = vaultMeta;
+    let fresh: typeof vaultMeta = null;
     try {
       const wire = await api.getVaultMeta();
-      meta = { vault_setup_at: wire.vault_setup_at, vault_tombstone_at: wire.vault_tombstone_at };
-      setVaultMeta(meta);
-    } catch { /* keep whatever cached state we had */ }
+      fresh = { vault_setup_at: wire.vault_setup_at, vault_tombstone_at: wire.vault_tombstone_at };
+      setVaultMeta(fresh);
+    } catch { /* decided below — a failed fetch never routes to setup */ }
 
-    if (!meta || !meta.vault_setup_at) {
+    const action = secureFolderAction(fresh, vaultMeta);
+    if (action === 'unavailable') {
+      addToast("Couldn't load your Encrypted Folder. Check your connection and try again.", 'error');
+      return;
+    }
+    if (action === 'setup') {
       setSecureDialog({ kind: 'setup' });
       return;
     }
@@ -594,7 +600,7 @@ export function App() {
       return;
     }
     // Already unlocked — let the default expand-folder behaviour run.
-  }, [vaultMeta]);
+  }, [vaultMeta, addToast]);
 
   // Load the set of paths for which the user has set a PIN. Used by the
   // context menu to render Change/Remove vs. Set.

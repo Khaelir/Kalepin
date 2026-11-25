@@ -11,6 +11,7 @@ import { evaluateSetupGate } from '../../crypto/setup-gate';
 import { STRENGTH_LABELS } from '../../crypto/passphrase-strength';
 import { clearCachedMasterKek } from '../../crypto/key-store';
 import { clearRecoveryUnlockPending, isRecoveryUnlockPending } from '../../crypto/recovery-pending';
+import { canOfferVaultSetup, type VaultLoadState } from '../../crypto/vault-status';
 import { PassphraseSetupDialog } from '../PassphraseSetupDialog';
 
 type Mode =
@@ -46,6 +47,9 @@ function bytesToBase64(buf: Uint8Array): string {
 export function SecuritySettings({ userEmail }: Props) {
   const [meta, setMeta] = useState<VaultMeta | null>(null);
   const [vaultStatus, setVaultStatus] = useState<{ setupAt: number | null; tombstoneAt: number | null }>({ setupAt: null, tombstoneAt: null });
+  // Whether `meta`/`vaultStatus` reflect the server. A failed load must not
+  // read as "not set up": setting up over an existing vault orphans its files.
+  const [loadState, setLoadState] = useState<VaultLoadState>('loading');
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: 'idle' });
@@ -55,9 +59,18 @@ export function SecuritySettings({ userEmail }: Props) {
       const wire = await api.getVaultMeta();
       setVaultStatus({ setupAt: wire.vault_setup_at, tombstoneAt: wire.vault_tombstone_at });
       setMeta(decodeVaultMetaWire(wire));
-    } catch (err) {
-      setError((err as Error).message || 'Failed to load vault meta');
+      setLoadState('loaded');
+    } catch {
+      // Keep what we had if an earlier load succeeded; otherwise the status is unknown.
+      setLoadState((s) => (s === 'loaded' ? s : 'failed'));
+      setError("Couldn't load your Encrypted Folder status.");
     }
+  };
+
+  const retryLoad = async () => {
+    setError(null);
+    setLoadState('loading');
+    await reloadMeta();
   };
 
   useEffect(() => {
@@ -327,7 +340,11 @@ export function SecuritySettings({ userEmail }: Props) {
       {error && <div className="error">{error}</div>}
       <p>
         <strong>Vault status:</strong>{' '}
-        {vaultStatus.tombstoneAt
+        {loadState === 'loading'
+          ? 'Loading…'
+          : loadState === 'failed'
+          ? 'Unavailable'
+          : vaultStatus.tombstoneAt
           ? `Tombstoned ${new Date(vaultStatus.tombstoneAt).toLocaleString()}`
           : vaultStatus.setupAt
           ? `Set up ${new Date(vaultStatus.setupAt).toLocaleString()}`
@@ -335,7 +352,12 @@ export function SecuritySettings({ userEmail }: Props) {
       </p>
       {mode.kind === 'idle' && (
         <div className="security-actions">
-          {!meta && !vaultStatus.tombstoneAt && (
+          {loadState === 'failed' && (
+            <button className="modal-btn modal-btn-confirm" onClick={() => void retryLoad()}>
+              Retry
+            </button>
+          )}
+          {canOfferVaultSetup(loadState, !!meta, !!vaultStatus.tombstoneAt) && (
             <button className="modal-btn modal-btn-confirm" onClick={() => setMode({ kind: 'setup' })}>
               Set up Encrypted Folder
             </button>
