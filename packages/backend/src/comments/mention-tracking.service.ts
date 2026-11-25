@@ -119,7 +119,8 @@ export class MentionTrackingService {
 
     // 1. Comment mentions from sidecar files
     for (const filePath of mdFiles) {
-      const data = await this.sidecar.read(filePath);
+      // An unreadable sidecar must not stop the backfill (it runs at boot).
+      const data = await this.sidecar.read(filePath).catch(() => ({ comments: {} }));
       for (const block of Object.values(data.comments)) {
         for (const thread of block.threads) {
           for (const comment of thread.comments) {

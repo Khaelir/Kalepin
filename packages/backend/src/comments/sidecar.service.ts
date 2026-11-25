@@ -15,12 +15,18 @@ export class SidecarService {
 
   async read(filePath: string): Promise<SidecarData> {
     const sPath = this.sidecarPath(filePath);
+    let content: string;
     try {
-      const content = await this.storage.read(sPath);
-      return JSON.parse(content);
-    } catch {
-      return { comments: {} };
+      content = await this.storage.read(sPath);
+    } catch (err) {
+      // Only a missing sidecar means "no comments". Anything else (an
+      // envelope this KEK cannot open, an I/O error) must surface: an empty
+      // result would be written back by the next comment, erasing every
+      // thread.
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { comments: {} };
+      throw err;
     }
+    return JSON.parse(content);
   }
 
   async write(filePath: string, data: SidecarData): Promise<void> {
