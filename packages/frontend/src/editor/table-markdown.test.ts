@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Editor } from '@tiptap/core';
+import { Editor, type JSONContent } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
 import { TableRow } from '@tiptap/extension-table-row';
@@ -66,6 +66,11 @@ describe('table markdown round-trip', () => {
     ['a backslash before an escaped |', table('| a\\\\\\|b | y |'), table('| a\\\\\\|b | y |')],
     ['inline code containing |', table('| `a\\|b` | y |'), table('| `a\\|b` | y |')],
     ['an aliased wikilink written [[target\\|alias]]', table('| [[Roadmap\\|the map]] | x |'), table('| [[Roadmap\\|the map]] | x |')],
+    // The bare spelling, as saved by earlier versions, is read as one cell and saved escaped.
+    ['an aliased wikilink written [[target|alias]]', table('| [[Roadmap|the map]] | x |'), table('| [[Roadmap\\|the map]] | x |')],
+    ['an aliased wikilink in a header cell', '| [[Roadmap|the map]] | b |\n| --- | --- |\n| 1 | 2 |\n', '| [[Roadmap\\|the map]] | b |\n| --- | --- |\n| 1 | 2 |\n'],
+    ['inline code holding wikilink syntax', table('| `[[a|b]]` | 2 |'), table('| `[[a\\|b]]` | 2 |')],
+    ['inline code holding escaped wikilink syntax', table('| `[[a\\|b]]` | 2 |'), table('| `[[a\\|b]]` | 2 |')],
   ])('keeps %s', (_name, input, expected) => {
     const editor = createEditor(input);
     const output = getMarkdown(editor);
@@ -86,5 +91,23 @@ describe('table markdown round-trip', () => {
     expect(output).toBe(table('| x 1\\|2 | y |'));
     // Compare the table only: the edit also made StarterKit append a trailing paragraph.
     expect(createEditor(output).getJSON().content?.[0]).toEqual(editor.getJSON().content?.[0]);
+  });
+
+  it('reads a bare [[target|alias]] in a row as an aliased wikilink', () => {
+    const doc: JSONContent = createEditor(table('| [[Roadmap|the map]] | x |')).getJSON();
+    const cells = doc.content?.[0].content?.[1].content;
+    expect(cells?.[0].content?.[0].content).toEqual([
+      { type: 'wikilink', attrs: { target: 'Roadmap', alias: 'the map' } },
+    ]);
+    expect(cells?.[1].content?.[0].content).toEqual([{ type: 'text', text: 'x' }]);
+  });
+
+  it('leaves pipes outside wikilinks as cell separators', () => {
+    const editor = createEditor(table('| [[A|a]] 1|2 |'));
+    expect(getMarkdown(editor)).toBe(table('| [[A\\|a]] 1 | 2 |'));
+  });
+
+  it('leaves aliased wikilinks outside tables as they are', () => {
+    expect(getMarkdown(createEditor('See [[Roadmap|the map]] | done'))).toBe('See [[Roadmap|the map]] | done');
   });
 });
