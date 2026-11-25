@@ -102,13 +102,8 @@ export class AnonymousRateLimitGuard implements CanActivate {
 }
 
 function extractIp(req: any): string {
-  // Prefer X-Forwarded-For when behind a known proxy. Fall back to req.ip.
-  // The shape mirrors `access-log/extract-ip.ts` which is the canonical
-  // implementation; we don't import to avoid a tight coupling and to keep
-  // the guard minimal.
-  const xff = req.headers?.['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.length > 0) {
-    return xff.split(',')[0].trim();
-  }
-  return req.ip ?? 'unknown';
+  // Express derives req.ip from X-Forwarded-For only for the proxies that
+  // `trust proxy` names (see main.ts). Reading the header here instead would
+  // let any client pick its bucket — a fresh value per request means no limit.
+  return req.ip ?? req.socket?.remoteAddress ?? 'unknown';
 }

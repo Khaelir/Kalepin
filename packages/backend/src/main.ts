@@ -7,6 +7,7 @@ import { AppModule } from './app.module';
 import { createAppUrlWarningMiddleware } from './auth/oauth/app-url-warning';
 import { createOAuthCorsMiddleware } from './auth/oauth/oauth-cors';
 import { createSecurityHeadersMiddleware } from './security-headers';
+import { resolveTrustProxy } from './trust-proxy';
 
 function resolveLogLevels(level: string): LogLevel[] {
   switch (level) {
@@ -28,8 +29,10 @@ async function bootstrap() {
   // Trust the reverse proxy (Traefik in production) so req.protocol /
   // X-Forwarded-* headers reflect the original client request. Required for
   // OAuth discovery URLs to advertise https:// when fronted by TLS termination
-  // and for the APP_URL drift warning below to mean anything.
-  app.set('trust proxy', true);
+  // and for the APP_URL drift warning below to mean anything. Only proxies
+  // matching TRUST_PROXY count: trusting every hop would let any client set
+  // req.ip, the key of the per-IP rate limits, with its own X-Forwarded-For.
+  app.set('trust proxy', resolveTrustProxy());
 
   // Boot-time check: log a loud warning if APP_URL diverges from the protocol
   // or host the proxy is forwarding. The most common self-hosted footgun.

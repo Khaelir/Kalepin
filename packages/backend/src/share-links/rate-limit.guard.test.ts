@@ -104,15 +104,19 @@ describe('AnonymousRateLimitGuard', () => {
     }
   });
 
-  it('uses X-Forwarded-For first IP when present (proxy-aware)', () => {
+  it('keys on req.ip, ignoring a client-supplied X-Forwarded-For', () => {
     const guard = new AnonymousRateLimitGuard(
       makeReflector({ max: 1, windowMs: 60_000, name: 'test' }),
     );
-    const reqA = { ip: '10.0.0.1', headers: { 'x-forwarded-for': '203.0.113.4, 10.0.0.1' } };
-    const reqB = { ip: '10.0.0.1', headers: { 'x-forwarded-for': '203.0.113.5, 10.0.0.1' } };
-    // Same proxy IP but different real client IPs in XFF — should NOT share bucket.
+    // Express has already resolved req.ip through `trust proxy`; a fresh
+    // spoofed header per request must not open a fresh bucket.
+    const reqA = { ip: '198.51.100.7', headers: { 'x-forwarded-for': '203.0.113.4' } };
+    const reqB = { ip: '198.51.100.7', headers: { 'x-forwarded-for': '203.0.113.5' } };
     guard.canActivate(makeContext(reqA, () => {}));
-    assert.equal(guard.canActivate(makeContext(reqB, () => {})), true);
+    assert.throws(
+      () => guard.canActivate(makeContext(reqB, () => {})),
+      (e: Error) => e instanceof HttpException && (e as HttpException).getStatus() === 429,
+    );
   });
 
   it('the @RateLimit decorator stores metadata at the configured key', () => {
