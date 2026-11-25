@@ -16,6 +16,7 @@ import { Response } from 'express';
 import { CombinedAuthGuard, JwtPayload } from '../auth';
 import { RequiredScope } from '../auth/required-scope.decorator';
 import { isUnderPersonalRoot, personalRootFor } from '../auth/visibility';
+import { GrantAwareVisibility } from '../auth/grant-aware-visibility.service';
 import {
   ENCRYPTION_PREDICATES,
   EncryptionPredicates,
@@ -61,6 +62,7 @@ export class PinController {
     private readonly pinService: PinService,
     @Inject(ENCRYPTION_PREDICATES)
     private readonly predicates: EncryptionPredicates,
+    private readonly visibility: GrantAwareVisibility,
   ) {}
 
   @Post(':path/pin')
@@ -115,6 +117,9 @@ export class PinController {
     if (!body || typeof body.pin !== 'string') {
       throw new BadRequestException('pin is required');
     }
+    // 404 for a note the caller cannot read, before any PIN lookup: "No PIN
+    // set" versus "wrong-pin" would tell that someone's private note exists.
+    await this.visibility.assertReadableBy(path, email);
 
     const kind = isOwnerOf(path, email) ? 'owner' : 'grantee';
     const result = await this.pinService.verifyPin(

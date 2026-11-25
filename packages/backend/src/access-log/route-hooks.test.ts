@@ -36,6 +36,8 @@ afterEach(async () => {
 });
 
 const filesServiceStub = {
+  assertReadable: async () => undefined,
+  assertWritable: async () => undefined,
   readFile: async () => 'file body',
   createFile: async () => undefined,
 } as any;
