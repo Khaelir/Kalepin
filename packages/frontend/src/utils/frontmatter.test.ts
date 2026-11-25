@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeTag, parseFrontmatter, tagSearchQuery } from './frontmatter';
+import { normalizeTag, parseFrontmatter, splitFrontmatterBlock, tagSearchQuery } from './frontmatter';
 
 const tags = (yaml: string) => parseFrontmatter(`---\n${yaml}\n---\n# Body #inline\n`).tags;
 
@@ -66,6 +66,46 @@ describe('normalizeTag', () => {
     expect(normalizeTag('1984')).toBeNull();
     expect(normalizeTag('-')).toBeNull();
     expect(normalizeTag('a b')).toBeNull();
+  });
+});
+
+describe('splitFrontmatterBlock', () => {
+  const split = (content: string) => {
+    const parts = splitFrontmatterBlock(content);
+    expect(parts.frontmatter + parts.body).toBe(content);
+    return parts;
+  };
+
+  it('keeps the block, fences and the blank lines after it, out of the body', () => {
+    expect(split('---\ntags: [project, kalepin]\nstatus: draft\n---\n\nBody text\n')).toEqual({
+      frontmatter: '---\ntags: [project, kalepin]\nstatus: draft\n---\n\n',
+      body: 'Body text\n',
+    });
+    expect(split('---\na: 1\n...\n# Title\n')).toEqual({ frontmatter: '---\na: 1\n...\n', body: '# Title\n' });
+  });
+
+  it('handles a note that is only frontmatter', () => {
+    expect(split('---\na: 1\n---')).toEqual({ frontmatter: '---\na: 1\n---', body: '' });
+    expect(split('---\na: 1\n---\n\n')).toEqual({ frontmatter: '---\na: 1\n---\n\n', body: '' });
+  });
+
+  it('keeps a BOM and CRLF line endings in the block as written', () => {
+    expect(split('﻿---\r\na: 1\r\n---\r\n\r\nBody')).toEqual({
+      frontmatter: '﻿---\r\na: 1\r\n---\r\n\r\n',
+      body: 'Body',
+    });
+  });
+
+  it('finds no block where parseFrontmatter finds none', () => {
+    for (const content of ['', 'Body\n', '---\ntags: [x]\n', '# T\n---\na: 1\n---\n', ' ---\na: 1\n---\n']) {
+      expect(split(content)).toEqual({ frontmatter: '', body: content });
+      expect(parseFrontmatter(content).tags).toEqual([]);
+    }
+  });
+
+  it('feeds parseFrontmatter the same tags as the whole note', () => {
+    const note = '---\ntags:\n  - a\n  - b\nstatus: done\n---\nText #inline\n';
+    expect(parseFrontmatter(splitFrontmatterBlock(note).frontmatter)).toEqual(parseFrontmatter(note));
   });
 });
 

@@ -21,7 +21,7 @@ import { TableMap } from 'prosemirror-tables';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import { DOMParser as PMDOMParser } from '@tiptap/pm/model';
 import { OTClient } from './ot-client';
-import { diffMarkdownToOps, applyOpsToMarkdown } from './ot-bridge';
+import { diffMarkdownToOps, applyOpsToMarkdown, transformPosition } from './ot-bridge';
 import { createSlashMenuPlugin, SlashMenuState, SlashCommand, slashCommands, SLASH_COMMAND_GROUPS, setActiveDocPath } from './slash-commands';
 import { createWikilinkMenuPlugin, WikilinkMenuState, wikilinkMenuPluginKey } from './wikilink-autocomplete';
 import { WikilinkAutocomplete } from './WikilinkAutocomplete';
@@ -47,6 +47,8 @@ import { DrawioEditorController } from './drawio-editor-controller';
 import { DocHeader } from './DocHeader';
 import { flattenFiles } from './extensions/wikilink-utils';
 import { wikilinkTargetFor } from '../components/related-notes';
+import { splitFrontmatterBlock } from '../utils/frontmatter';
+import type { OTOperation } from '@kalepin/shared';
 
 // The built-in Link extension registers a clickHandler plugin that calls
 // window.open(link.href, link.target) during the mouseup event. Even with
@@ -65,10 +67,12 @@ const Link = LinkBase.extend({
 
 type EditorMode = 'rendered' | 'raw';
 
-/** Apply a remote markdown update using a surgical PM transaction instead of setContent(). */
+/**
+ * Apply a remote markdown update using a surgical PM transaction instead of setContent().
+ * `newMd` is the note body: the frontmatter block never goes into TipTap.
+ */
 function applyRemoteMarkdown(
   editor: ReturnType<typeof useEditor>,
-  shadowRef: React.MutableRefObject<string>,
   newMd: string,
   isRemoteRef: React.MutableRefObject<boolean>,
 ) {
@@ -84,7 +88,6 @@ function applyRemoteMarkdown(
     isRemoteRef.current = true;
     editor.commands.setContent(newMd);
     isRemoteRef.current = false;
-    shadowRef.current = newMd;
     return;
   }
 
@@ -144,8 +147,6 @@ function applyRemoteMarkdown(
     editor.view.dispatch(tr);
     isRemoteRef.current = false;
   }
-
-  shadowRef.current = newMd;
 }
 
 /** Generate a URL-friendly slug from heading text (standard markdown anchor rules). */
@@ -460,8 +461,10 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
   const [mentionMenu, setMentionMenu] = useState<MentionMenuState | null>(null);
   const isRemoteRef = useRef(false);
   const [mode, setMode] = useState<EditorMode>('rendered');
+  const modeRef = useRef<EditorMode>('rendered');
   const [rawContent, setRawContent] = useState('');
-  const remoteOpsQueueRef = useRef<any[]>([]);
+  const rawTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const rawSelectionRef = useRef<[number, number] | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [floatingInput, setFloatingInput] = useState<FloatingInputState | null>(null);
   const [docHeadings, setDocHeadings] = useState<DocHeading[]>([]);
@@ -475,6 +478,15 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
 
   // Shadow markdown — mirrors what the server has
   const shadowRef = useRef<string>(initialContent);
+  // The note's frontmatter block stays out of TipTap (markdown-it would read
+  // its fences as horizontal rules) and is put back wherever the editor's doc
+  // turns into markdown. The state copy feeds the DocHeader pills.
+  const frontmatterRef = useRef(splitFrontmatterBlock(initialContent).frontmatter);
+  const [frontmatter, setFrontmatter] = useState(frontmatterRef.current);
+  // The markdown TipTap's doc stands for. It lags the shadow while raw mode
+  // or a version preview has the doc's place, and catches up after.
+  const editorTextRef = useRef(initialContent);
+  const previewActiveRef = useRef(false);
 
   // Save status state machine
   const { status: saveStatus, markDirty, markAcked, resetToSynced } = useSaveStatus(wsClient, docId);
@@ -681,7 +693,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       CommentHighlights,
       TableOfContents,
     ],
-    content: initialContent,
+    content: splitFrontmatterBlock(initialContent).body,
     immediatelyRender: false,
     onCreate({ editor }) {
       // Initialize shadow to the original server content (not getMarkdown(),
@@ -694,16 +706,12 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       // Skip remote changes and non-doc changes
       if (isRemoteRef.current) return;
       if (!transaction.docChanged) return;
+      // The doc only stands for the note in rendered mode; a version preview is never sent
+      if (modeRef.current !== 'rendered' || previewActiveRef.current) return;
 
-      const newMd = (editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText();
-      const ops = diffMarkdownToOps(shadowRef.current, newMd);
-      shadowRef.current = newMd;
-
-      if (ops && otClientRef.current) {
-        console.debug(`[Editor] Sending local op for docId="${docId}"`);
-        otClientRef.current.sendOp(ops);
-        markDirty();
-      }
+      const newMd = frontmatterRef.current + ((editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText());
+      editorTextRef.current = newMd;
+      sendLocalText(newMd);
     },
   });
 
@@ -787,56 +795,76 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
     return () => setCommentHighlightOnClick(null);
   }, [editor]);
 
-  // Preview mode: swap editor content and toggle editable
-  const liveContentRef = useRef<string | null>(null);
-  const liveShadowRef = useRef<string | null>(null);
+  // A local edit (rendered doc or raw textarea) turned the note into `newMd`:
+  // send the difference from the shadow.
+  function sendLocalText(newMd: string) {
+    const ops = diffMarkdownToOps(shadowRef.current, newMd);
+    shadowRef.current = newMd;
+
+    if (ops && otClientRef.current) {
+      console.debug(`[Editor] Sending local op for docId="${docId}"`);
+      otClientRef.current.sendOp(ops);
+      markDirty();
+    }
+  }
+
+  // The server's text changed under the editor (remote op, rejected op,
+  // re-sync): track the whole note in the shadow and show it where the note
+  // is on screen; `ops`, when known, keeps the raw textarea's selection in
+  // place. Reads refs only, so callbacks holding an older copy stay correct.
+  function applyServerText(md: string, ops?: OTOperation) {
+    shadowRef.current = md;
+    if (modeRef.current === 'raw') {
+      const ta = rawTextareaRef.current;
+      if (ta && ops && document.activeElement === ta) {
+        rawSelectionRef.current = [transformPosition(ta.selectionStart, ops), transformPosition(ta.selectionEnd, ops)];
+      }
+      setRawContent(md);
+      return;
+    }
+    if (previewActiveRef.current) return;
+    const parts = splitFrontmatterBlock(md);
+    frontmatterRef.current = parts.frontmatter;
+    setFrontmatter(parts.frontmatter);
+    editorTextRef.current = md;
+    if (editor) applyRemoteMarkdown(editor, parts.body, isRemoteRef);
+  }
+
+  // Preview mode: swap editor content and toggle editable. The preview is
+  // never sent and never enters the undo history (Cmd+Z after "Back to
+  // current" must not bring the old version back); remote ops meanwhile
+  // update the shadow, and the live doc catches up when the preview closes.
+  const liveDocRef = useRef<PMNode | null>(null);
 
   useEffect(() => {
     if (!editor) return;
+    const showDoc = (content: Fragment) => {
+      const tr = editor.state.tr.replaceWith(0, editor.state.doc.content.size, content);
+      tr.setMeta('addToHistory', false);
+      isRemoteRef.current = true;
+      editor.view.dispatch(tr);
+      isRemoteRef.current = false;
+    };
     if (previewContent != null) {
-      // Entering preview: save live content, swap in preview, make read-only
-      if (liveContentRef.current === null) {
-        liveContentRef.current = (editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText();
-        liveShadowRef.current = shadowRef.current;
+      // Entering preview: save the live doc, swap in preview, make read-only
+      if (!previewActiveRef.current) {
+        previewActiveRef.current = true;
+        liveDocRef.current = editor.state.doc;
       }
       // Parse markdown → HTML → PM doc, then replace editor content via transaction
       const mdParser = (editor.storage as any).markdown?.parser;
-      if (mdParser && previewContent) {
-        const html = mdParser.parse(previewContent);
-        const wrapper = document.createElement('div');
-        wrapper.innerHTML = html;
-        const newDoc = PMDOMParser.fromSchema(editor.schema).parse(wrapper);
-        const tr = editor.state.tr.replaceWith(0, editor.state.doc.content.size, newDoc.content);
-        isRemoteRef.current = true;
-        editor.view.dispatch(tr);
-        isRemoteRef.current = false;
-      } else {
-        isRemoteRef.current = true;
-        editor.commands.setContent(previewContent || '<p></p>');
-        isRemoteRef.current = false;
-      }
+      const previewBody = splitFrontmatterBlock(previewContent).body;
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = mdParser && previewBody ? mdParser.parse(previewBody) : '<p></p>';
+      showDoc(PMDOMParser.fromSchema(editor.schema).parse(wrapper).content);
       editor.setEditable(false);
-    } else if (liveContentRef.current !== null) {
-      // Leaving preview: restore live content, make editable (unless permission says otherwise)
+    } else if (previewActiveRef.current) {
+      // Leaving preview: restore the live doc, make editable (unless permission says otherwise)
+      previewActiveRef.current = false;
       editor.setEditable(permission !== 'comment');
-      const mdParser = (editor.storage as any).markdown?.parser;
-      if (mdParser) {
-        const html = mdParser.parse(liveContentRef.current);
-        const wrapper = document.createElement('div');
-        wrapper.innerHTML = html;
-        const newDoc = PMDOMParser.fromSchema(editor.schema).parse(wrapper);
-        const tr = editor.state.tr.replaceWith(0, editor.state.doc.content.size, newDoc.content);
-        isRemoteRef.current = true;
-        editor.view.dispatch(tr);
-        isRemoteRef.current = false;
-      } else {
-        isRemoteRef.current = true;
-        editor.commands.setContent(liveContentRef.current);
-        isRemoteRef.current = false;
-      }
-      shadowRef.current = liveShadowRef.current ?? liveContentRef.current;
-      liveContentRef.current = null;
-      liveShadowRef.current = null;
+      if (liveDocRef.current) showDoc(liveDocRef.current.content);
+      liveDocRef.current = null;
+      if (editorTextRef.current !== shadowRef.current) applyServerText(shadowRef.current);
     }
   }, [editor, previewContent]);
 
@@ -945,7 +973,8 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     },
     appendWikilink(targetPath: string) {
-      if (!editor || !editor.isEditable) return false;
+      // In raw mode the doc is not what the user edits, and is never sent
+      if (!editor || !editor.isEditable || modeRef.current !== 'rendered') return false;
       const { wikilink, paragraph } = editor.schema.nodes;
       if (!wikilink || !paragraph) return false;
       const target = wikilinkTargetFor(targetPath, activeFileRef.current, flattenFiles(filesRef.current));
@@ -1112,40 +1141,27 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       wsClient,
       docId,
       initialRevision,
-      (ops) => {
-        if (mode === 'raw') {
-          remoteOpsQueueRef.current.push(ops);
-          return;
-        }
-        const newMd = applyOpsToMarkdown(shadowRef.current, ops);
-        applyRemoteMarkdown(editor, shadowRef, newMd, isRemoteRef);
-      },
+      (ops) => applyServerText(applyOpsToMarkdown(shadowRef.current, ops), ops),
       {
         initialShadow: initialContent,
-        onError: () => {
-          // Reset optimistic shadow to confirmed shadow
-          const confirmed = otClient.getConfirmedShadow();
-          if (confirmed) {
-            shadowRef.current = confirmed;
-            applyRemoteMarkdown(editor, shadowRef, confirmed, isRemoteRef);
-          }
-        },
+        // Reset optimistic shadow to confirmed shadow
+        onError: () => applyServerText(otClient.getConfirmedShadow()),
       },
     );
     otClientRef.current = otClient;
     console.debug(`[Editor] OTClient created for docId="${docId}", revision=${initialRevision}`);
 
-    // Track acks to update confirmed shadow and save status
+    // Track acks for the save status. OTClient handled this ack first (and
+    // may have sent its buffer): the note is only acked once nothing is left.
     const offAck = wsClient.on('ack', (msg: any) => {
       if (msg.docId !== docId) return;
-      // Update confirmed shadow to current shadow (which reflects acked state)
-      otClient.setConfirmedShadow(shadowRef.current);
-      markAcked();
+      if (!otClient.hasUnackedOps()) markAcked();
     });
 
     return () => {
-      console.debug(`[Editor] OTClient cleanup/destroy for docId="${docId}"`);
-      otClient.destroy();
+      console.debug(`[Editor] OTClient cleanup/release for docId="${docId}"`);
+      // Edits still in flight or buffered keep going until the server acks them
+      otClient.release();
       offAck();
     };
   }, [editor, wsClient, docId, initialRevision]);
@@ -1164,49 +1180,23 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
     const offDocOpened = wsClient.on('doc:opened', (msg: any) => {
       if (msg.docId !== docId) return;
       // Only handle re-sync (not initial open)
-      if (!otClientRef.current) return;
+      const otClient = otClientRef.current;
+      if (!otClient) return;
 
       console.debug(`[Editor] Re-sync doc:opened for "${docId}", rev=${msg.revision}`);
 
-      // Destroy old OTClient
-      otClientRef.current.destroy();
-
-      // Create new OTClient with fresh revision
-      const otClient = new OTClient(
-        wsClient,
-        docId,
-        msg.revision,
-        (ops) => {
-          if (mode === 'raw') {
-            remoteOpsQueueRef.current.push(ops);
-            return;
-          }
-          const newMd = applyOpsToMarkdown(shadowRef.current, ops);
-          applyRemoteMarkdown(editor, shadowRef, newMd, isRemoteRef);
-        },
-        {
-          initialShadow: msg.content,
-          onError: () => {
-            const confirmed = otClient.getConfirmedShadow();
-            if (confirmed) {
-              shadowRef.current = confirmed;
-              applyRemoteMarkdown(editor, shadowRef, confirmed, isRemoteRef);
-            }
-          },
-        },
-      );
-      otClientRef.current = otClient;
-
-      // Replace editor content with server state
-      shadowRef.current = msg.content;
-      applyRemoteMarkdown(editor, shadowRef, msg.content, isRemoteRef);
+      // Rebase the edits the server never confirmed onto its current text and
+      // send them again, rather than replacing them with the server's text
+      applyServerText(otClient.resync(msg.content, msg.revision, shadowRef.current));
 
       // Restore editable and reset save status (comment-only stays locked).
       // Read permission from the payload — the server re-sends it on every
       // doc:opened, so a re-sync sees the current value even if the prop is stale.
       const livePermission = msg.permission ?? permission;
-      editor.setEditable(livePermission !== 'comment');
+      if (!previewActiveRef.current) editor.setEditable(livePermission !== 'comment');
+      // Not "Saved" while re-sent edits await their ack
       resetToSynced();
+      if (otClient.hasUnackedOps()) markDirty();
     });
 
     return () => {
@@ -1278,58 +1268,34 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
     };
   }, [editor, wsClient, docId]);
 
-  // Update the OT callback when mode changes so queuing works
-  useEffect(() => {
-    if (!otClientRef.current || !editor) return;
-    otClientRef.current.setRemoteOpCallback((ops) => {
-      if (mode === 'raw') {
-        remoteOpsQueueRef.current.push(ops);
-        return;
-      }
-      const newMd = applyOpsToMarkdown(shadowRef.current, ops);
-      applyRemoteMarkdown(editor, shadowRef, newMd, isRemoteRef);
-    });
-  }, [mode, editor]);
-
+  // Raw mode edits the note's markdown as the server has it (the shadow,
+  // frontmatter included) and sends every change as it is typed; remote ops
+  // land in the textarea.
   const switchToRaw = useCallback(() => {
-    if (!editor) return;
-
-    // Flush pending OT ops
-    if (otClientRef.current) {
-      otClientRef.current.flush();
-    }
-
-    // Use the shadow (which is markdown) for raw editing
-    const md = (editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText();
-    shadowRef.current = md;
-    setRawContent(md);
+    modeRef.current = 'raw';
+    setRawContent(shadowRef.current);
     setMode('raw');
-  }, [editor]);
+  }, []);
 
   const switchToRendered = useCallback(() => {
     if (!editor) return;
-
-    // Send any raw edits as OT ops
-    const rawOps = diffMarkdownToOps(shadowRef.current, rawContent);
-    if (rawOps && otClientRef.current) {
-      otClientRef.current.sendOp(rawOps);
-    }
-    shadowRef.current = rawContent;
-
-    // Apply queued remote ops to shadow
-    const queued = remoteOpsQueueRef.current;
-    remoteOpsQueueRef.current = [];
-    for (const remoteOps of queued) {
-      shadowRef.current = applyOpsToMarkdown(shadowRef.current, remoteOps);
-    }
-
-    // Update editor to final state
-    isRemoteRef.current = true;
-    editor.commands.setContent(shadowRef.current);
-    isRemoteRef.current = false;
-
+    // Raw edits are already sent: just load the note as it is now
+    modeRef.current = 'rendered';
+    if (editorTextRef.current !== shadowRef.current) applyServerText(shadowRef.current);
     setMode('rendered');
-  }, [editor, rawContent]);
+  }, [editor]);
+
+  const handleRawChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setRawContent(e.target.value);
+    sendLocalText(e.target.value);
+  }, []);
+
+  // A remote op rewrote the textarea's value: put the selection back where it maps
+  useLayoutEffect(() => {
+    const selection = rawSelectionRef.current;
+    rawSelectionRef.current = null;
+    if (selection && rawTextareaRef.current) rawTextareaRef.current.setSelectionRange(selection[0], selection[1]);
+  }, [rawContent]);
 
   // Lock editor on ERROR/DISCONNECTED, unlock on recovery to SYNCED.
   // Comment-only grantees are also locked — server rejects their ops, this
@@ -1341,12 +1307,11 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
     editor.setEditable(!isLocked && !isReadOnlyByPermission);
   }, [editor, isLocked, isReadOnlyByPermission, previewContent]);
 
-  // Copy editor content as markdown (for error banner button)
+  // Copy the note as markdown (for error banner button): the shadow is the
+  // latest local text in rendered and raw mode alike
   const handleCopyContent = useCallback(() => {
-    if (!editor) return;
-    const md = (editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText();
-    navigator.clipboard.writeText(md);
-  }, [editor]);
+    navigator.clipboard.writeText(shadowRef.current);
+  }, []);
 
   // beforeunload guard — warn when there are unconfirmed changes
   useEffect(() => {
@@ -1515,7 +1480,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
                 updatedAt={updatedAt}
                 wordCount={wordCount}
                 backlinkCount={backlinkCount}
-                content={editor ? (editor.storage as any).markdown?.getMarkdown?.() ?? initialContent : initialContent}
+                content={frontmatter}
                 presenceUsers={presenceUsers}
                 onRename={onRename}
                 onRenameError={onRenameError}
@@ -1741,12 +1706,14 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       {mode === 'raw' && (
         <div className="raw-markdown-view">
           <div className="raw-sync-indicator">
-            Sync paused — edits will sync when switching back to rendered mode
+            Raw Markdown — edits sync as you type
           </div>
           <textarea
+            ref={rawTextareaRef}
             className="raw-markdown-textarea"
             value={rawContent}
-            onChange={(e) => setRawContent(e.target.value)}
+            onChange={handleRawChange}
+            readOnly={isLocked || isReadOnlyByPermission}
             spellCheck={false}
           />
         </div>

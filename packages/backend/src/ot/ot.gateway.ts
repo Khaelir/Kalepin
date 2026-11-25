@@ -498,6 +498,12 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  /** Heartbeat: the client drops a socket that stops answering. */
+  @SubscribeMessage('ping')
+  handlePing() {
+    return { type: 'pong' };
+  }
+
   @SubscribeMessage('presence')
   handlePresence(
     @ConnectedSocket() client: AuthenticatedWebSocket,

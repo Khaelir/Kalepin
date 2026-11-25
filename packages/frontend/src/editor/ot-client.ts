@@ -1,5 +1,6 @@
 import type { OTOperation } from '@kalepin/shared';
 import { WSClient } from '../ws/ws-client';
+import { applyOpsToMarkdown, diffMarkdownToOps } from './ot-bridge';
 
 type OpCallback = (ops: OTOperation) => void;
 type ErrorCallback = (error: string) => void;
@@ -20,7 +21,13 @@ export class OTClient {
   private ws: WSClient;
   private docId: string;
   private cleanupFns: (() => void)[] = [];
+  /** The server's text at `revision`: every acked and remote op applied, nothing in flight. */
   private confirmedShadow: string = '';
+  /** Settles the socket's doc:open hold once nothing of ours is in flight. */
+  private settleInFlight: (() => void) | null = null;
+  /** The editor went away: destroy once the last op is acked. */
+  private released = false;
+  private static readonly RELEASE_TIMEOUT_MS = 30000;
 
   constructor(ws: WSClient, docId: string, revision: number, onRemoteOp: OpCallback, opts?: { onError?: ErrorCallback; initialShadow?: string }) {
     this.ws = ws;
@@ -45,7 +52,10 @@ export class OTClient {
       this.handleError(msg.message || 'Unknown error');
     });
 
-    this.cleanupFns = [offAck, offOp, offError];
+    // Ops in flight died with the socket; a re-sync re-sends them.
+    const offDisconnected = ws.on('disconnected', () => this.markIdle());
+
+    this.cleanupFns = [offAck, offOp, offError, offDisconnected];
   }
 
   destroy(): void {
@@ -54,6 +64,28 @@ export class OTClient {
       cleanup();
     }
     this.cleanupFns = [];
+    this.settleInFlight?.();
+    this.settleInFlight = null;
+  }
+
+  /**
+   * The editor is going away (note switch, remount). Ops still in flight, or
+   * buffered behind the in-flight one, would be lost with a plain destroy():
+   * keep listening until the server has acked them (the buffer goes out on
+   * the next ack), then destroy. Gives up if the socket drops or after
+   * RELEASE_TIMEOUT_MS.
+   */
+  release(): void {
+    if (this.state === ClientState.Synchronized) {
+      this.destroy();
+      return;
+    }
+    console.debug(`[OTClient] release docId="${this.docId}", state=${ClientState[this.state]}: waiting for acks`);
+    this.released = true;
+    this.onRemoteOp = () => {};
+    this.onError = undefined;
+    const timer = setTimeout(() => this.destroy(), OTClient.RELEASE_TIMEOUT_MS);
+    this.cleanupFns.push(() => clearTimeout(timer));
   }
 
   /** Get the confirmed shadow (last server-acknowledged content). */
@@ -61,9 +93,29 @@ export class OTClient {
     return this.confirmedShadow;
   }
 
-  /** Update the confirmed shadow (called externally when shadow is known). */
-  setConfirmedShadow(shadow: string): void {
-    this.confirmedShadow = shadow;
+  /** Whether a local op is still waiting for the server's ack. */
+  hasUnackedOps(): boolean {
+    return this.state !== ClientState.Synchronized;
+  }
+
+  /**
+   * Re-sync after a reconnect: doc:opened brought the server's text and
+   * revision. Local edits the server never confirmed (in flight, buffered,
+   * or sent into a dead socket) are rebased onto that text and sent again
+   * instead of being dropped. `localText` is the text the editor shows;
+   * returns the text it should show now.
+   */
+  resync(serverText: string, revision: number, localText: string): string {
+    const { text, ops } = rebaseUnconfirmed(this.confirmedShadow, localText, serverText, this.pending, this.buffer);
+    console.debug(`[OTClient] resync docId="${this.docId}", rev=${this.revision}->${revision}, resend=${!!ops}`);
+    this.state = ClientState.Synchronized;
+    this.pending = null;
+    this.buffer = null;
+    this.revision = revision;
+    this.confirmedShadow = serverText;
+    this.markIdle();
+    if (ops) this.sendOp(ops);
+    return text;
   }
 
   setRemoteOpCallback(cb: OpCallback): void {
@@ -87,6 +139,7 @@ export class OTClient {
       case ClientState.Synchronized:
         this.pending = ops;
         this.state = ClientState.AwaitingConfirm;
+        this.markInFlight();
         console.debug(`[OTClient] Sending op to server docId="${this.docId}", rev=${this.revision}`);
         this.ws.send({ type: 'op', docId: this.docId, ops, rev: this.revision });
         break;
@@ -103,11 +156,15 @@ export class OTClient {
 
   private handleAck(rev: number): void {
     console.debug(`[OTClient] handleAck docId="${this.docId}", newRev=${rev}, state=${ClientState[this.state]}`);
+    // Nothing in flight: the ack is for another client on this doc (one released on a remount)
+    if (this.state === ClientState.Synchronized) return;
     this.revision = rev;
+    this.confirmedShadow = applyOpsToMarkdown(this.confirmedShadow, this.pending!);
     switch (this.state) {
       case ClientState.AwaitingConfirm:
         this.pending = null;
         this.state = ClientState.Synchronized;
+        this.markIdle();
         break;
       case ClientState.AwaitingWithBuffer:
         this.pending = this.buffer;
@@ -126,11 +183,26 @@ export class OTClient {
     this.state = ClientState.Synchronized;
     // Invoke error callback so the editor can transition to ERROR state
     this.onError?.(message);
+    this.markIdle();
+  }
+
+  /** An op is in flight: hold the socket's next doc:open until it is acked. */
+  private markInFlight(): void {
+    if (this.settleInFlight) return;
+    this.ws.holdDocOpenUntil(new Promise<void>((resolve) => { this.settleInFlight = resolve; }));
+  }
+
+  /** Nothing of ours is in flight any more (acked, rejected, or the socket died). */
+  private markIdle(): void {
+    this.settleInFlight?.();
+    this.settleInFlight = null;
+    if (this.released) this.destroy();
   }
 
   private handleRemoteOp(ops: OTOperation, rev: number): void {
     console.debug(`[OTClient] handleRemoteOp docId="${this.docId}", rev=${rev}`);
     this.revision = rev;
+    this.confirmedShadow = applyOpsToMarkdown(this.confirmedShadow, ops);
 
     switch (this.state) {
       case ClientState.Synchronized:
@@ -152,6 +224,37 @@ export class OTClient {
         break;
     }
   }
+}
+
+/**
+ * Carry local edits the server never confirmed onto its current text.
+ * `base` is the server text the client last knew, `local` that text with the
+ * unconfirmed ops applied (`pending`, then `buffer`), `server` the server's
+ * text now. Returns the text to show and the op to send against `server`
+ * (null when nothing is left to send).
+ */
+export function rebaseUnconfirmed(
+  base: string,
+  local: string,
+  server: string,
+  pending: OTOperation | null,
+  buffer: OTOperation | null,
+): { text: string; ops: OTOperation | null } {
+  let ours = pending && buffer ? composeOps(pending, buffer) : pending;
+  // The connection may have dropped after the server applied the in-flight
+  // op but before its ack arrived. (If others edited too this can't be told
+  // apart, and the op is sent again.)
+  if (pending && applyOpsToMarkdown(base, pending) === server) {
+    base = server;
+    ours = buffer;
+  }
+  // Keep the exact ops when they add up to the local text, else diff
+  if (!ours || applyOpsToMarkdown(base, ours) !== local) ours = diffMarkdownToOps(base, local);
+  if (!ours) return { text: server, ops: null };
+  const theirs = diffMarkdownToOps(base, server);
+  if (theirs) ours = transformOps(ours, theirs)[0];
+  const text = applyOpsToMarkdown(server, ours);
+  return { text, ops: text === server ? null : ours };
 }
 
 // Minimal client-side OT transform (mirrors server logic)
