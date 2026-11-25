@@ -13,6 +13,7 @@ import { isE2EEncrypted, prettifyPath } from './crypto/path-predicates';
 import { SECURE_FOLDER_ENABLED } from './feature-flags';
 import { consumeSelfSaved } from './self-saved-paths';
 import { decideActiveDocEcho } from './active-doc-echo-gate';
+import { OpenRequests } from './open-request';
 import { NudgeRegistry } from './nudge-pending';
 import { FileTree, isPersonalRootSegment, PERSONAL_PREFIX, partitionTree } from './components/FileTree';
 import { CommentsPanel } from './components/CommentsPanel';
@@ -252,6 +253,8 @@ export function App() {
   const wsRef = useRef<WSClient | null>(null);
   const editorRef = useRef<EditorHandle>(null);
   const activeFileRef = useRef<string | null>(null);
+  // The note open in flight; a new open (or closing the note) supersedes it.
+  const openRequestsRef = useRef(new OpenRequests());
   // Last time an OT 'op' or 'ack' frame landed on the active doc, in ms epoch.
   // The `file:changed` echo for the same path within the 2s window is the OT
   // flush coming back through chokidar; suppress the user-visible toast.
@@ -456,6 +459,8 @@ export function App() {
         // owns its own decrypt loop and will refresh on next open.
         if (isE2EEncrypted(msg.path)) return;
         api.readFileContent(msg.path).then((content) => {
+          // The user may have switched notes while the read was in flight.
+          if (msg.path !== activeFileRef.current) return;
           setDocState((prev) => prev ? { ...prev, content } : null);
         }).catch(() => { /* transient — leave the editor as-is */ });
       }
@@ -701,6 +706,7 @@ export function App() {
           setModal(null);
           tutorialKeyRef.current++;
           setFiles((prev) => [...prev, { name, path: name, type: 'file' as const }]);
+          openRequestsRef.current.cancel();
           setActiveFile(name);
           setDocState({ content: TUTORIAL_CONTENT, revision: 0 });
           window.history.pushState({ file: name }, '', buildDocUrlByPath(name));
@@ -742,6 +748,11 @@ export function App() {
   // `/doc/<path>` form so back/forward stays consistent.
   const openFile = useCallback(async (path: string, heading?: string, opts?: { replaceHistory?: boolean }) => {
     console.debug(`[App.openFile] Switching to file: "${path}", previous activeFile: "${activeFile}"`);
+    // Supersede the previous open: its WS listeners and fallback timer go,
+    // and every continuation below checks `isCurrent()` before touching
+    // state, so a late response for the note the user left can't land here.
+    const req = openRequestsRef.current.begin();
+    const isCurrent = () => req.isCurrent() && activeFileRef.current === path;
     setDocState(null); // Clear stale content so Editor unmounts until new content arrives
     setActiveFile(path);
     // Update the ref now rather than after render, so a rename followed both
@@ -751,6 +762,11 @@ export function App() {
     setPresenceUsers([]);
     setVersionPreview(null);
     setSelectedVersion(null);
+    // Reset per-note side data now, so the previous note's comments (whose
+    // thread ids reply/resolve/delete would send to this path) never show here.
+    setComments([]);
+    setDocAuthor(null);
+    setDocUpdatedAt(null);
     pendingHeadingRef.current = heading ?? headingFromUrl();
 
     // Initial push uses the legacy path form. We `replaceState` to /doc/<id>
@@ -791,9 +807,11 @@ export function App() {
     const restFallback = async () => {
       try {
         const result = await api.readFile({ path });
+        if (!isCurrent()) return;
         setDocState({ content: result.content, revision: 0 });
         if (result.handle?.id) normalizeToHandle(result.handle.id);
       } catch (err) {
+        if (!isCurrent()) return;
         if (err instanceof api.PinLockedError) {
           setPinPrompt({ path, mode: 'verify', resumeOpen: true });
         }
@@ -801,16 +819,19 @@ export function App() {
     };
 
     // Try WebSocket first for OT session
-    if (wsRef.current) {
-      await wsRef.current.ready;
+    const ws = wsRef.current;
+    if (ws) {
+      await ws.ready;
+      if (!isCurrent()) return;
       console.debug(`[App.openFile] Sending doc:open via WS for "${path}"`);
-      wsRef.current.send({ type: 'doc:open', docId: path, unlock: api.getPinUnlockToken(path) });
+      ws.send({ type: 'doc:open', docId: path, unlock: api.getPinUnlockToken(path) });
 
       const cleanup: Array<() => void> = [];
-      const finish = () => { resolved = true; for (const off of cleanup) off(); };
+      const finish = () => { resolved = true; for (const off of cleanup.splice(0)) off(); };
+      req.onCancel(finish);
 
-      cleanup.push(wsRef.current.on('doc:opened', (msg: any) => {
-        if (msg.docId === path && !resolved) {
+      cleanup.push(ws.on('doc:opened', (msg: any) => {
+        if (msg.docId === path && !resolved && isCurrent()) {
           finish();
           console.debug(`[App.openFile] Received doc:opened for "${path}", revision=${msg.revision}, content length=${msg.content?.length}`);
           setDocState({ content: msg.content, revision: msg.revision, permission: msg.permission });
@@ -823,8 +844,8 @@ export function App() {
       // authenticated user). Fall back to REST immediately instead of waiting the
       // safety-net timeout — which is the dominant cause of perceived slowness on
       // shared/public-vault file opens.
-      cleanup.push(wsRef.current.on('error', (msg: any) => {
-        if (msg?.docId === path && !resolved) {
+      cleanup.push(ws.on('error', (msg: any) => {
+        if (msg?.docId === path && !resolved && isCurrent()) {
           finish();
           console.debug(`[App.openFile] WS error code=${msg.code} for "${path}", falling back to REST`);
           void restFallback();
@@ -834,43 +855,48 @@ export function App() {
       // Safety net: covers cases where the gateway drops the frame entirely
       // (e.g. unexpected disconnect mid-flight). 700ms is well above a healthy
       // round-trip but short enough to not feel laggy.
-      setTimeout(() => {
-        if (!resolved) {
+      const safetyNet = setTimeout(() => {
+        if (!resolved && isCurrent()) {
           finish();
           console.warn(`[App.openFile] WS timeout for "${path}", falling back to REST API`);
           void restFallback();
         }
       }, 700);
+      cleanup.push(() => clearTimeout(safetyNet));
     } else {
       // No WebSocket — use REST API directly
       await restFallback();
     }
+    if (!isCurrent()) return;
 
     // Comments aren't on the editor's critical path; fetch in the background
-    // and reset first so a stale list from the previous file doesn't show
-    // through during the request.
-    setComments([]);
+    // (the list was reset above so the previous file's doesn't show through).
     api.fetchComments(path)
-      .then(setComments)
+      .then((threads) => { if (isCurrent()) setComments(threads); })
       .catch(() => { /* ignore — same as before */ });
 
     // Fetch backlink count for badge
     api.fetchBacklinks(path)
-      .then((bl) => setBacklinkCount(bl.length))
-      .catch(() => setBacklinkCount(0));
+      .then((bl) => { if (isCurrent()) setBacklinkCount(bl.length); })
+      .catch(() => { if (isCurrent()) setBacklinkCount(0); });
 
     // Fetch last-edited metadata for the doc header
-    setDocAuthor(null);
-    setDocUpdatedAt(null);
     api.fetchHistory(path)
       .then((entries) => {
         const latest = entries[0];
-        if (latest) {
+        if (latest && isCurrent()) {
           setDocAuthor(latest.userEmail);
           setDocUpdatedAt(latest.createdAt);
         }
       })
       .catch(() => { /* ignore — header just omits those fields */ });
+  }, []);
+
+  /** Refetch `path`'s comments after a change, unless the user has since moved to another note. */
+  const refreshComments = useCallback((path: string) => {
+    return api.fetchComments(path).then((threads) => {
+      if (activeFileRef.current === path) setComments(threads);
+    });
   }, []);
 
   // After `src` was renamed/moved to `dest`, re-open the active doc at its new
@@ -906,6 +932,7 @@ export function App() {
   const closeActiveDocUnder = useCallback((removedPath: string): string | null => {
     const current = activeFileRef.current;
     if (!current || !isSelfOrUnder(current, removedPath)) return null;
+    openRequestsRef.current.cancel();
     activeFileRef.current = null;
     setActiveFile(null);
     setDocState(null);
@@ -1848,7 +1875,7 @@ export function App() {
                   currentUser={currentUserRef.current}
                   onAddComment={(blockId, text, quotedText, positionHint) => {
                     api.addComment(activeFile!, blockId, text, quotedText, positionHint).then(() =>
-                      api.fetchComments(activeFile!).then(setComments),
+                      refreshComments(activeFile!),
                     );
                   }}
                   onOpenComments={() => { setRailTab('comments'); }}
@@ -1921,22 +1948,22 @@ export function App() {
                   e2eEncrypted={!!activeFile && isE2EEncrypted(activeFile)}
                   onAddComment={(blockId, text) => {
                     api.addComment(activeFile!, blockId, text).then(() =>
-                      api.fetchComments(activeFile!).then(setComments),
+                      refreshComments(activeFile!),
                     );
                   }}
                   onReply={(blockId, threadId, text) => {
                     api.replyToComment(activeFile!, blockId, threadId, text).then(() =>
-                      api.fetchComments(activeFile!).then(setComments),
+                      refreshComments(activeFile!),
                     );
                   }}
                   onResolve={(blockId, threadId, resolved) => {
                     api.resolveComment(activeFile!, blockId, threadId, resolved).then(() =>
-                      api.fetchComments(activeFile!).then(setComments),
+                      refreshComments(activeFile!),
                     );
                   }}
                   onDelete={(blockId, threadId, commentId) => {
                     api.deleteComment(activeFile!, blockId, threadId, commentId).then(() =>
-                      api.fetchComments(activeFile!).then(setComments),
+                      refreshComments(activeFile!),
                     );
                   }}
                   onNavigate={(thread) => {
