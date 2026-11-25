@@ -5,7 +5,16 @@ import { STORAGE_ADAPTER, StorageAdapter } from '../storage';
 import { FileWatcherService } from '../files/file-watcher.service';
 import { NoteLink } from '../entities';
 import { FileChangeEvent, FileEntry } from '@kalepin/shared';
-import { parseLinksFromMarkdown, resolveWikilink, resolveMarkdownLink, canLinkTo } from './link-parser';
+import {
+  parseLinksFromMarkdown,
+  resolveWikilink,
+  resolveMarkdownLink,
+  canLinkTo,
+  linkTargetEdits,
+  applyTextEdits,
+  renamedWikilinkTarget,
+  relativeMarkdownTarget,
+} from './link-parser';
 import { OTService } from '../ot/ot.service';
 import { isVisibleTo, personalRootFor } from '../auth/visibility';
 import { isE2EPath } from '../crypto/encryption-predicates';
@@ -491,96 +500,87 @@ export class LinkIndexService {
 
   // --- Rename support ---
 
+  /**
+   * Follow a note rename: every link that resolved to `oldPath` is rewritten
+   * to reach `newPath` (through OT when its note is open), and its index row
+   * follows. Nothing else in the linking notes changes. A link from a note
+   * that may not reach `newPath` keeps its text and is re-resolved.
+   */
   async rewriteLinksOnRename(oldPath: string, newPath: string): Promise<void> {
+    const moves = new Map([[oldPath, newPath]]);
+    const { before, after } = this.pathsAroundMoves(moves);
+    this.allPaths = after;
+    /** Where a note is now. */
+    const moved = (p: string) => moves.get(p) ?? p;
+
     // Find all notes that link to the old path
-    const linksToOld = await this.linkRepo.find({ where: { targetPath: oldPath } });
-    if (linksToOld.length === 0) return;
+    const linksToOld = await this.linkRepo.find({ where: { targetPath: In([...moves.keys()]) } });
+    // A link follows a move when it did resolve to the moved note (the row
+    // may be stale) and its note may still reach the note's new path.
+    const followedMove = (
+      l: Pick<NoteLink, 'rawTarget' | 'linkType' | 'sourcePath'>,
+    ): { from: string; to: string } | null => {
+      const from = this.resolveTarget(l, before);
+      const to = from === null ? undefined : moves.get(from);
+      return from !== null && to !== undefined && canLinkTo(moved(l.sourcePath), to) ? { from, to } : null;
+    };
 
-    const oldBasename = path.basename(oldPath, '.md');
-    const newBasename = path.basename(newPath, '.md');
-    // A row from a note that may not link to the renamed note (left by an
-    // older index) must not get its new name written into it.
-    const unreachable = linksToOld.filter(
-      (l) => !canLinkTo(l.sourcePath, oldPath) || !canLinkTo(l.sourcePath, newPath),
-    );
-
-    for (const link of linksToOld) {
-      if (unreachable.includes(link)) continue;
+    for (const sourcePath of new Set(linksToOld.filter((l) => followedMove(l)).map((l) => l.sourcePath))) {
+      const source = moved(sourcePath);
+      const edits = (content: string) => linkTargetEdits(content, (link) => {
+        const move = followedMove({ ...link, sourcePath });
+        if (!move) return null;
+        return link.linkType === 'wikilink'
+          ? renamedWikilinkTarget(link.rawTarget, move.from, move.to, source, after)
+          : relativeMarkdownTarget(link.rawTarget, source, move.to);
+      });
       try {
-        // Compute the old and new text for this link
-        let oldText: string;
-        let newText: string;
-
-        if (link.linkType === 'wikilink') {
-          const newTarget = link.rawTarget.includes('/')
-            ? link.rawTarget.replace(oldBasename, newBasename)
-            : newBasename;
-          // For OT replacement we match exact wikilink text (without alias part)
-          oldText = `[[${link.rawTarget}`;
-          newText = `[[${newTarget}`;
-        } else {
-          const sourceDir = path.dirname(link.sourcePath);
-          const newRelative = path.posix.relative(sourceDir, newPath);
-          oldText = `](${link.rawTarget})`;
-          newText = `](${newRelative})`;
-        }
-
-        // Check if source file has an active OT session
-        const session = this.otService?.sessionManager?.getSession(link.sourcePath);
-        if (session) {
-          // Emit OT operation instead of writing to disk
-          const result = await this.otService!.applyServerReplacement(
-            link.sourcePath,
-            oldText,
-            newText,
-          );
+        // An open note is still keyed by its old path: sessions follow the move after this.
+        if (this.otService?.sessionManager?.getSession(sourcePath)) {
+          const result = await this.otService.applyServerReplacement(sourcePath, edits);
           if (result) {
-            this.otBroadcast?.(link.sourcePath, result.ops, result.revision);
+            this.otBroadcast?.(sourcePath, result.ops, result.revision);
           }
         } else {
-          // No active session — read-replace-write to disk
-          const content = await this.storage.read(link.sourcePath);
-          let updated = content;
-
-          if (link.linkType === 'wikilink') {
-            const escapedRaw = link.rawTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const wikilinkRegex = new RegExp(`\\[\\[${escapedRaw}(\\|[^\\]]*)?\\]\\]`, 'g');
-            updated = updated.replace(wikilinkRegex, (_match, alias) => {
-              const newTarget = link.rawTarget.includes('/')
-                ? link.rawTarget.replace(oldBasename, newBasename)
-                : newBasename;
-              return `[[${newTarget}${alias || ''}]]`;
-            });
-          } else {
-            const sourceDir = path.dirname(link.sourcePath);
-            const newRelative = path.posix.relative(sourceDir, newPath);
-            const escapedRaw = link.rawTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const mdLinkRegex = new RegExp(`(\\[[^\\]]*\\])\\(${escapedRaw}\\)`, 'g');
-            updated = updated.replace(mdLinkRegex, `$1(${newRelative})`);
-          }
-
+          const content = await this.storage.read(source);
+          const updated = applyTextEdits(content, edits(content));
           if (updated !== content) {
-            await this.storage.write(link.sourcePath, updated);
+            await this.storage.write(source, updated);
           }
         }
       } catch {
-        this.logger.warn(`Failed to rewrite links in ${link.sourcePath}`);
+        this.logger.warn(`Failed to rewrite links in ${source}`);
       }
     }
 
-    // Update target_path entries in the index
-    await this.linkRepo
-      .createQueryBuilder()
-      .update(NoteLink)
-      .set({ targetPath: newPath })
-      .where('targetPath = :oldPath', { oldPath })
-      .execute();
-    if (unreachable.length > 0) {
-      await this.linkRepo.update({ id: In(unreachable.map((l) => l.id)) }, { targetPath: null });
+    // Index rows follow the move; the others are re-resolved from where their note is now.
+    const ids = new Map<string, Map<string | null, number[]>>();
+    for (const l of linksToOld) {
+      const target = followedMove(l)?.to ?? this.resolveTarget({ ...l, sourcePath: moved(l.sourcePath) }, after);
+      const byTarget = ids.get(l.targetPath!) ?? new Map<string | null, number[]>();
+      byTarget.set(target, [...(byTarget.get(target) ?? []), l.id]);
+      ids.set(l.targetPath!, byTarget);
+    }
+    for (const [oldTarget, byTarget] of ids) {
+      for (const [target, rowIds] of byTarget) {
+        await this.linkRepo.update({ id: In(rowIds), targetPath: oldTarget }, { targetPath: target });
+      }
     }
 
-    // Update allPaths
-    this.allPaths = this.allPaths.map((p) => (p === oldPath ? newPath : p));
+    // Links naming the new path that were broken until now.
+    for (const dest of moves.values()) await this.resolveLinksTo(dest);
+  }
+
+  /** The note paths before and after `moves` (old path → new path), keeping their order. */
+  private pathsAroundMoves(moves: Map<string, string>): { before: string[]; after: string[] } {
+    const dests = new Set(moves.values());
+    const before = this.allPaths.filter((p) => !dests.has(p));
+    const beforeSet = new Set(before);
+    for (const src of moves.keys()) if (!beforeSet.has(src)) before.push(src);
+    const after = [...new Set(this.allPaths.map((p) => moves.get(p) ?? p))];
+    const afterSet = new Set(after);
+    for (const dest of dests) if (!afterSet.has(dest)) after.push(dest);
+    return { before, after };
   }
 
   async getGraphData(centerPath?: string, depth = 2, userEmail?: string): Promise<GraphData> {

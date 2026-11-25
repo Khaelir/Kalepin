@@ -1,6 +1,14 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { parseLinksFromMarkdown, resolveWikilink, resolveMarkdownLink, canLinkTo } from './link-parser';
+import {
+  parseLinksFromMarkdown,
+  resolveWikilink,
+  resolveMarkdownLink,
+  canLinkTo,
+  linkTargetEdits,
+  applyTextEdits,
+  renamedWikilinkTarget,
+} from './link-parser';
 
 describe('parseLinksFromMarkdown', () => {
   it('extracts wikilinks', () => {
@@ -162,6 +170,54 @@ describe('resolveWikilink', () => {
   it('resolves empty fragment [[Page#]] same as [[Page]]', () => {
     const result = resolveWikilink('Architecture#', 'index.md', allPaths);
     assert.equal(result, 'docs/Architecture.md');
+  });
+});
+
+describe('linkTargetEdits', () => {
+  const content = [
+    'a [[ Plan#Goals | the goals ]] b [[Planning]] [[#Plan]]',
+    '[see](./Plan.md) ![[Plan]] [[Plan|alias]] [Plan](Planning.md)',
+  ].join('\r\n');
+
+  it('locates every link target where it is written', () => {
+    const links = parseLinksFromMarkdown(content);
+    assert.equal(links.length, 6);
+    for (const link of links) {
+      assert.equal(content.substr(link.index, link.rawTarget.length), link.rawTarget);
+    }
+  });
+
+  it('replaces only the targets the callback changes, keeping headings and aliases', () => {
+    const edits = linkTargetEdits(content, (link) =>
+      link.rawTarget === 'Plan' ? 'Roadmap' : link.rawTarget === './Plan.md' ? './Roadmap.md' : null,
+    );
+    assert.equal(applyTextEdits(content, edits), [
+      'a [[ Roadmap#Goals | the goals ]] b [[Planning]] [[#Plan]]',
+      '[see](./Roadmap.md) ![[Plan]] [[Roadmap|alias]] [Plan](Planning.md)',
+    ].join('\r\n'));
+  });
+});
+
+describe('renamedWikilinkTarget', () => {
+  const oldPath = 'Projects/sub/Plan.md';
+  const newPath = 'Projects/sub/Roadmap.md';
+  const paths = [newPath, 'Other/index.md'];
+  const renamed = (raw: string) => renamedWikilinkTarget(raw, oldPath, newPath, 'Other/index.md', paths);
+
+  it('keeps the form the link was written in', () => {
+    assert.equal(renamed('Plan'), 'Roadmap');
+    assert.equal(renamed('plan.md'), 'Roadmap.md');
+    assert.equal(renamed('Projects/sub/Plan'), 'Projects/sub/Roadmap');
+    assert.equal(renamed('sub/Plan'), 'sub/Roadmap');
+    assert.equal(renamed('elsewhere/Plan'), 'elsewhere/Roadmap');
+  });
+
+  it('follows a move to another folder', () => {
+    const moved = (raw: string) =>
+      renamedWikilinkTarget(raw, oldPath, 'Archive/Plan.md', 'Other/index.md', ['Archive/Plan.md']);
+    assert.equal(moved('Plan'), 'Plan');
+    assert.equal(moved('Projects/sub/Plan'), 'Archive/Plan');
+    assert.equal(moved('sub/Plan'), 'Archive/Plan');
   });
 });
 

@@ -6,6 +6,8 @@ export interface ParsedLink {
   linkType: 'wikilink' | 'markdown';
   lineNumber: number;
   context: string;
+  /** Offset in the content where `rawTarget` is written. */
+  index: number;
 }
 
 /**
@@ -16,6 +18,8 @@ export interface ParsedLink {
 export function parseLinksFromMarkdown(content: string): ParsedLink[] {
   const links: ParsedLink[] = [];
   const lines = content.split('\n');
+  const leadingSpace = (s: string) => s.length - s.trimStart().length;
+  let lineStart = 0;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -36,7 +40,8 @@ export function parseLinksFromMarkdown(content: string): ParsedLink[] {
       // Empty rawTarget means same-page link like [[#Heading]] — stored with empty target,
       // resolved to source file at query time
       if (!rawTarget && hashIdx < 0) continue;
-      links.push({ rawTarget, linkType: 'wikilink', lineNumber, context: line });
+      const index = lineStart + match.index + 2 + leadingSpace(inner);
+      links.push({ rawTarget, linkType: 'wikilink', lineNumber, context: line, index });
     }
 
     // Markdown links: [text](path) — exclude images ![alt](path)
@@ -48,11 +53,55 @@ export function parseLinksFromMarkdown(content: string): ParsedLink[] {
       if (target.startsWith('http://') || target.startsWith('https://') || target.startsWith('mailto:')) continue;
       // Skip non-markdown files (images, etc.)
       if (!target.endsWith('.md')) continue;
-      links.push({ rawTarget: target, linkType: 'markdown', lineNumber, context: line });
+      const index = lineStart + match.index + match[1].length + 3 + leadingSpace(match[2]);
+      links.push({ rawTarget: target, linkType: 'markdown', lineNumber, context: line, index });
     }
+    lineStart += line.length + 1;
   }
 
   return links;
+}
+
+/** Replace `length` characters at `index` with `text`. */
+export interface TextEdit {
+  index: number;
+  length: number;
+  text: string;
+}
+
+/**
+ * Edits that change link targets in `content`, for exactly the links
+ * `parseLinksFromMarkdown` finds. `retarget` returns a link's new target, or
+ * null to leave it. Only the target is replaced: a wikilink's `#heading` and
+ * `|alias`, and a markdown link's text, stay as written. Same-page links
+ * ([[#Heading]]) are never passed. The edits are sorted and do not overlap.
+ */
+export function linkTargetEdits(
+  content: string,
+  retarget: (link: ParsedLink) => string | null,
+): TextEdit[] {
+  const edits: TextEdit[] = [];
+  let end = 0;
+  const links = parseLinksFromMarkdown(content).sort((a, b) => a.index - b.index);
+  for (const link of links) {
+    if (!link.rawTarget || link.index < end) continue;
+    const text = retarget(link);
+    if (text === null || text === link.rawTarget) continue;
+    edits.push({ index: link.index, length: link.rawTarget.length, text });
+    end = link.index + link.rawTarget.length;
+  }
+  return edits;
+}
+
+/** `content` with sorted, non-overlapping `edits` applied. */
+export function applyTextEdits(content: string, edits: TextEdit[]): string {
+  let out = '';
+  let pos = 0;
+  for (const edit of edits) {
+    out += content.slice(pos, edit.index) + edit.text;
+    pos = edit.index + edit.length;
+  }
+  return out + content.slice(pos);
 }
 
 /** `_users/{email}` for a path in a personal folder, `''` for the shared vault. */
@@ -133,4 +182,45 @@ export function resolveMarkdownLink(
 ): string {
   const sourceDir = path.dirname(sourcePath);
   return path.posix.normalize(path.posix.join(sourceDir, rawTarget));
+}
+
+/**
+ * The target a wikilink written `rawTarget`, which resolved to `oldPath`,
+ * should read once that note is at `newPath`. The link keeps its form: a
+ * name stays a name, the full path stays a full path, a path ending the old
+ * path keeps its number of segments, any other path keeps its folder part,
+ * and a `.md` suffix stays as written. When that would resolve from
+ * `sourcePath` to another note among `paths`, or depend on their order to
+ * pick between same-named notes, the full new path is used.
+ */
+export function renamedWikilinkTarget(
+  rawTarget: string,
+  oldPath: string,
+  newPath: string,
+  sourcePath: string,
+  paths: string[],
+): string {
+  const ext = rawTarget.endsWith('.md') ? '.md' : '';
+  const written = rawTarget.slice(0, rawTarget.length - ext.length).split('/');
+  const oldSegments = oldPath.slice(0, -'.md'.length).split('/');
+  const newSegments = newPath.slice(0, -'.md'.length).split('/');
+  const tail = oldSegments.slice(-written.length);
+  const endsOldPath = written.length <= oldSegments.length
+    && written.every((s, i) => s.toLowerCase() === tail[i].toLowerCase());
+
+  let next: string;
+  if (endsOldPath && written.length === oldSegments.length) next = newSegments.join('/');
+  else if (endsOldPath) next = newSegments.slice(-written.length).join('/');
+  else next = [...written.slice(0, -1), newSegments[newSegments.length - 1]].join('/');
+  next += ext;
+
+  const resolvesToNewPath = (candidates: string[]) => resolveWikilink(next, sourcePath, candidates) === newPath;
+  if (resolvesToNewPath(paths) && resolvesToNewPath([...paths].reverse())) return next;
+  return newSegments.join('/') + ext;
+}
+
+/** A markdown link target from `sourcePath` to `targetPath`, keeping a leading `./` if written. */
+export function relativeMarkdownTarget(rawTarget: string, sourcePath: string, targetPath: string): string {
+  const relative = path.posix.relative(path.posix.dirname(sourcePath), targetPath);
+  return rawTarget.startsWith('./') && !relative.startsWith('../') ? './' + relative : relative;
 }
