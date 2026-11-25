@@ -13,7 +13,7 @@ import { isE2EEncrypted, prettifyPath } from './crypto/path-predicates';
 import { SECURE_FOLDER_ENABLED } from './feature-flags';
 import { consumeSelfSaved } from './self-saved-paths';
 import { decideActiveDocEcho } from './active-doc-echo-gate';
-import { OpenRequests } from './open-request';
+import { OpenRequests, readyWithin } from './open-request';
 import { NudgeRegistry } from './nudge-pending';
 import { FileTree, isPersonalRootSegment, PERSONAL_PREFIX, partitionTree } from './components/FileTree';
 import { CommentsPanel } from './components/CommentsPanel';
@@ -186,6 +186,9 @@ interface DocState {
   /** Resolved access level for the viewer. Absent on REST-fallback opens (treated as writable). */
   permission?: 'owner' | 'write' | 'comment';
 }
+
+/** How long opening a note waits for a WebSocket that is down before reading it over REST. */
+const WS_READY_TIMEOUT_MS = 1500;
 
 export function App() {
   const [token, setTokenState] = useState<string | null>(null);
@@ -818,11 +821,25 @@ export function App() {
       }
     };
 
-    // Try WebSocket first for OT session
+    // Try WebSocket first for OT session — unless it is down (reconnecting,
+    // or blocked by a proxy), in which case don't leave the editor empty.
     const ws = wsRef.current;
-    if (ws) {
-      await ws.ready;
-      if (!isCurrent()) return;
+    const wsUp = ws ? await readyWithin(ws.ready, WS_READY_TIMEOUT_MS) : false;
+    if (!isCurrent()) return;
+    if (ws && !wsUp) {
+      console.warn(`[App.openFile] WebSocket not connected for "${path}", falling back to REST API`);
+      // Join the live session once the socket is up. A reconnect re-sends
+      // doc:open from the mounted editor; the page's first connect isn't a
+      // reconnect, so send it here.
+      const offConnected = ws.on('connected', (msg: any) => {
+        offConnected();
+        if (!msg?.wasReconnect && isCurrent()) {
+          ws.send({ type: 'doc:open', docId: path, unlock: api.getPinUnlockToken(path) });
+        }
+      });
+      req.onCancel(offConnected);
+      await restFallback();
+    } else if (ws) {
       console.debug(`[App.openFile] Sending doc:open via WS for "${path}"`);
       ws.send({ type: 'doc:open', docId: path, unlock: api.getPinUnlockToken(path) });
 

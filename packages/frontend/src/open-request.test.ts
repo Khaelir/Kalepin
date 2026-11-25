@@ -1,5 +1,40 @@
-import { describe, it, expect, vi } from 'vitest';
-import { OpenRequests } from './open-request';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { OpenRequests, readyWithin } from './open-request';
+
+describe('readyWithin', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('resolves true when the connection is ready in time', async () => {
+    await expect(readyWithin(Promise.resolve(), 1000)).resolves.toBe(true);
+  });
+
+  it('resolves false when the connection stays down (ready never settles)', async () => {
+    vi.useFakeTimers();
+    const never = new Promise<void>(() => {});
+    const result = readyWithin(never, 1500);
+    await vi.advanceTimersByTimeAsync(1499);
+    let settled = false;
+    void result.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toBe(false);
+  });
+
+  it('resolves true when the socket connects before the deadline', async () => {
+    vi.useFakeTimers();
+    let open!: () => void;
+    const ready = new Promise<void>((r) => { open = r; });
+    const result = readyWithin(ready, 1500);
+    await vi.advanceTimersByTimeAsync(500);
+    open();
+    await expect(result).resolves.toBe(true);
+  });
+
+  it('resolves false when ready rejects', async () => {
+    await expect(readyWithin(Promise.reject(new Error('closed')), 1000)).resolves.toBe(false);
+  });
+});
 
 describe('OpenRequests', () => {
   it('a new open supersedes the one in flight', () => {

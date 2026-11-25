@@ -43,3 +43,20 @@ export class OpenRequests {
     for (const fn of state.teardown.splice(0)) fn();
   }
 }
+
+/**
+ * Wait for a connection's `ready` promise, but no longer than `ms`. Resolves
+ * true if it resolved in time, false on timeout (or rejection). A WebSocket
+ * that is down keeps `ready` pending through its reconnect backoff — or for
+ * good behind a proxy that blocks WebSockets — so callers must not await it
+ * bare.
+ */
+export function readyWithin(ready: Promise<void>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    ready.then(
+      () => { clearTimeout(timer); resolve(true); },
+      () => { clearTimeout(timer); resolve(false); },
+    );
+  });
+}
