@@ -1867,7 +1867,7 @@ export function App() {
             )}
             {activeFile && isE2EEncrypted(activeFile) ? (
               SECURE_FOLDER_ENABLED ? (
-                <SecureEditor path={activeFile} />
+                <SecureEditor key={activeFile} path={activeFile} />
               ) : (
                 // Defensive: stray deep-link / devtool path under `_secure/`
                 // when the UI is gated. Avoid mounting the editor (which would
