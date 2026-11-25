@@ -385,7 +385,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
 
     if (!result) {
-      client.send(JSON.stringify({ type: 'error', message: 'Operation rejected' }));
+      client.send(JSON.stringify({ type: 'error', docId: data.docId, message: 'Operation rejected' }));
       return;
     }
 

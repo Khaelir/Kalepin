@@ -13,7 +13,13 @@ interface DocumentSession {
   docId: string;
   content: string;
   revision: number;
+  /**
+   * The latest ops, oldest first: `history[i]` took the doc from revision
+   * `historyStart + i` to the next. Older ops are trimmed, and a reset
+   * starts over, so `history[0]` is rarely revision 0.
+   */
   history: { ops: OTOperation; userId: number }[];
+  historyStart: number;
   clients: Map<WebSocket, ClientInfo>;
   flushTimer?: ReturnType<typeof setTimeout>;
   inactivityTimer?: ReturnType<typeof setTimeout>;
@@ -66,6 +72,7 @@ export class OTSessionManager {
         content: initialContent,
         revision: 0,
         history: [],
+        historyStart: 0,
         clients: new Map(),
         dirty: false,
         lastFlushedContent: initialContent,
@@ -147,6 +154,7 @@ export class OTSessionManager {
     session.content = newContent;
     session.revision++;
     session.history = [];
+    session.historyStart = session.revision;
     session.dirty = false;
     session.lastFlushedContent = newContent;
     this.logger.debug(`Reset session "${docId}", rev=${session.revision}, content length=${newContent.length}`);
@@ -184,13 +192,18 @@ export class OTSessionManager {
   ): { ops: OTOperation; revision: number } | null {
     const session = this.sessions.get(docId);
     if (!session) return null;
+    // Older than the ops still kept (or not a revision of this session): there
+    // is nothing to transform it against.
+    if (!Number.isInteger(clientRev) || clientRev < session.historyStart || clientRev > session.revision) {
+      this.logger.debug(`Rejected op "${docId}" at rev=${clientRev}, kept revisions ${session.historyStart}..${session.revision}`);
+      return null;
+    }
 
     // Transform against all operations since client's revision
     const needsTransform = clientRev < session.revision;
     let transformedOps = clientOps;
     for (let i = clientRev; i < session.revision; i++) {
-      const serverOp = session.history[i];
-      if (!serverOp) return null; // revision too old
+      const serverOp = session.history[i - session.historyStart];
       const [clientPrime] = transform(transformedOps, serverOp.ops);
       transformedOps = clientPrime;
     }
@@ -309,8 +322,10 @@ export class OTSessionManager {
 
       // Trim history to sliding window after successful flush
       const historyWindow = 1000;
-      if (session.history.length > historyWindow) {
-        session.history = session.history.slice(session.history.length - historyWindow);
+      const trimmed = session.history.length - historyWindow;
+      if (trimmed > 0) {
+        session.history = session.history.slice(trimmed);
+        session.historyStart += trimmed;
       }
 
       // Notify listeners of successful flush
