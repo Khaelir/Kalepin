@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import WebSocket from 'ws';
 import { OTOperation } from '@kalepin/shared';
 import { OTSessionManager } from './ot-session-manager';
+import { diffToOps } from './text-diff';
 import { OTOperationHistory } from '../entities';
 import { STORAGE_ADAPTER, StorageAdapter } from '../storage';
 import { ChangeTrackingService } from '../changes';
@@ -210,6 +211,33 @@ export class OTService {
     } catch (err) {
       this.logger.error(`Failed to merge the disk change of "${docId}"`, err);
     }
+  }
+
+  /**
+   * A server-side write (MCP, REST) to a note with a live session: `edit`
+   * gets the live content and returns the new one, and may throw (a stale
+   * base hash, text not found). The change is applied as an op at the
+   * current revision, so editors keep their pending edits, sent to the
+   * clients and saved. Edits made before it are saved first, so the note's
+   * history shows the write as a change of its own. Resolves to the new
+   * content, or null when no session holds `docId` (write to disk then).
+   */
+  async applyServerEdit(docId: string, edit: (current: string) => string, userId?: number): Promise<string | null> {
+    if (!this.sessionManager.getSession(docId)) return null;
+    // A failed flush is logged and retried by the session manager.
+    await this.sessionManager.flushNow(docId).catch(() => undefined);
+    const session = this.sessionManager.getSession(docId);
+    if (!session) return null;
+
+    const before = session.content;
+    const after = edit(before);
+    const ops = diffToOps(before, after);
+    if (ops) {
+      const result = this.sessionManager.applyOperation(docId, ops, session.revision, userId ?? 0);
+      if (result) await this.publishServerOp(docId, result, userId ?? 0);
+    }
+    await this.sessionManager.flushNow(docId).catch(() => undefined);
+    return after;
   }
 
   /**

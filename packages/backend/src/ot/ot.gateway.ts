@@ -167,6 +167,13 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.broadcastToDocClients(docId, { type: 'op', docId, ops, rev });
     });
 
+    // Server-side reads and writes of an open note (MCP, REST) use its live
+    // content: a write lands as an op instead of under the editors on disk.
+    this.filesService.setLiveDocs({
+      content: (path) => this.otService.sessionManager.getContent(path),
+      edit: (path, edit, userId) => this.otService.applyServerEdit(path, edit, userId),
+    });
+
     // A write that went to disk under an open note (a session that started
     // while it was being written, a trash restore onto an open path): merge
     // it into the live doc rather than resetting it, which dropped unsaved edits.
