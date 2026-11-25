@@ -96,12 +96,9 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // for `<path>.tmp.<hex>` before renaming into place. Those are an
       // implementation detail and must never reach clients.
       if (isAtomicWriteTmpPath(event.path)) return;
-      if (event.event === 'change' || (event.event === 'add' && event.path.endsWith('.md'))) {
-        // Skip broadcast if an OT session owns this document — the change
-        // was caused by the OT flush, not an external editor.
-        if (this.otService.sessionManager.getSession(event.path)) {
-          return;
-        }
+      if (this.mergeIfOpen(event)) {
+        // Merged into the live session; its clients get the change as an op.
+      } else if (event.event === 'change' || (event.event === 'add' && event.path.endsWith('.md'))) {
         this.broadcastToDocClients(event.path, {
           type: 'file:changed',
           path: event.path,
@@ -124,8 +121,9 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (isAtomicWriteTmpPath(event.path)) return;
       const email = this.extractPersonalOwnerEmail(event.path);
       if (!email) return;
-      if (event.event === 'change' || (event.event === 'add' && event.path.endsWith('.md'))) {
-        if (this.otService.sessionManager.getSession(event.path)) return;
+      if (this.mergeIfOpen(event)) {
+        // Merged into the live session; its clients get the change as an op.
+      } else if (event.event === 'change' || (event.event === 'add' && event.path.endsWith('.md'))) {
         this.fanoutToEmail(email, {
           type: 'file:changed',
           path: event.path,
@@ -163,18 +161,30 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.fanoutToEmail(email, { type: 'notifications:changed' });
     });
 
-    // Subscribe to external file writes (e.g. MCP)
-    this.filesService.on('file:written', async (payload: { path: string }) => {
-      const clients = await this.otService.handleExternalWrite(payload.path);
-      if (clients && clients.length > 0) {
-        const data = JSON.stringify({ type: 'doc:reload', path: payload.path });
-        for (const ws of clients) {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(data);
-          }
-        }
-      }
+    // Ops the server applies to a session itself (merged disk changes,
+    // server-side writes) reach its clients like any collaborator's op.
+    this.otService.setOpBroadcaster((docId, ops, rev) => {
+      this.broadcastToDocClients(docId, { type: 'op', docId, ops, rev });
     });
+
+    // A write that went to disk under an open note (a session that started
+    // while it was being written, a trash restore onto an open path): merge
+    // it into the live doc rather than resetting it, which dropped unsaved edits.
+    this.filesService.on('file:written', (payload: { path: string }) => {
+      void this.otService.mergeExternalChange(payload.path);
+    });
+  }
+
+  /**
+   * A watcher change or add on a note with a live session: the session's own
+   * writes are filtered out (mtime dedup, then by content in the merge), so
+   * this is another program's edit. Merge it, or the next flush would undo it.
+   */
+  private mergeIfOpen(event: { event: string; path: string }): boolean {
+    if (event.event !== 'change' && event.event !== 'add') return false;
+    if (!this.otService.sessionManager.getSession(event.path)) return false;
+    void this.otService.mergeExternalChange(event.path);
+    return true;
   }
 
   async handleConnection(client: AuthenticatedWebSocket, req: IncomingMessage) {

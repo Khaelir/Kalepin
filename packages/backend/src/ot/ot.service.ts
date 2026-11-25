@@ -16,6 +16,7 @@ export class OTService {
   private readonly logger = new Logger(OTService.name);
   readonly sessionManager = new OTSessionManager();
   private sessionCloseListeners: Array<(docId: string) => Promise<void> | void> = [];
+  private opBroadcaster?: (docId: string, ops: OTOperation, revision: number) => void;
 
   constructor(
     @Inject(STORAGE_ADAPTER) private readonly storage: StorageAdapter,
@@ -88,6 +89,11 @@ export class OTService {
     this.sessionCloseListeners.push(handler);
   }
 
+  /** How ops the server applies itself (merged disk changes, server-side writes) reach a doc's clients. */
+  setOpBroadcaster(broadcaster: (docId: string, ops: OTOperation, revision: number) => void): void {
+    this.opBroadcaster = broadcaster;
+  }
+
   /**
    * Join `ws` to the live session of `docId`, starting one from disk if
    * needed. Resolves to null when `docId` is not a note that can be edited
@@ -151,17 +157,12 @@ export class OTService {
     const renamed: Array<{ from: string; to: string; displaced: WebSocket[] }> = [];
     for (const from of this.sessionManager.sessionIdsAtOrUnder(src)) {
       const to = dest + from.slice(src.length);
+      // The move may have rewritten the file (attachment paths): merge that
+      // into the session while it still has the id its clients use, so the
+      // op reaches them and edits made since the pre-move flush are kept.
+      await this.mergeExternalChange(from, to);
       const result = this.sessionManager.renameSession(from, to);
       if (!result) continue;
-      const session = this.sessionManager.getSession(to);
-      if (session && !session.dirty) {
-        try {
-          const content = await this.storage.read(to);
-          if (content !== session.content) this.sessionManager.resetContent(to, content);
-        } catch {
-          // Unreadable right after the move — keep the in-memory content.
-        }
-      }
       renamed.push({ from, to, displaced: result.displaced });
     }
     return renamed;
@@ -195,21 +196,39 @@ export class OTService {
     return dropped;
   }
 
-  async handleExternalWrite(docId: string): Promise<WebSocket[] | null> {
-    const session = this.sessionManager.getSession(docId);
-    if (!session) return null;
-
-    let content = '';
+  /**
+   * The file of an open note changed without going through its session
+   * (another program, a write that raced the session's start, a trash
+   * restore). Merge the change into the live content and send it to the
+   * clients as an op, keeping their unsaved edits. `diskPath` is where the
+   * file is now, when it moved under the session.
+   */
+  async mergeExternalChange(docId: string, diskPath: string = docId): Promise<void> {
     try {
-      content = await this.storage.read(docId);
-    } catch {
-      return null;
+      const result = await this.sessionManager.mergeFromDisk(docId, () => this.storage.read(diskPath));
+      if (result) await this.publishServerOp(docId, result, 0);
+    } catch (err) {
+      this.logger.error(`Failed to merge the disk change of "${docId}"`, err);
     }
+  }
 
-    this.sessionManager.resetContent(docId, content);
-
-    const clients = this.sessionManager.getClients(docId);
-    return clients ? Array.from(clients.keys()) : [];
+  /**
+   * Record an op the server applied to a session itself, then send it to the
+   * session's clients. The send waits for the history row, as for client
+   * ops, so frames keep revision order.
+   */
+  private async publishServerOp(docId: string, result: { ops: OTOperation; revision: number }, userId: number): Promise<void> {
+    try {
+      await this.historyRepo.save({
+        documentId: docId,
+        revision: result.revision,
+        operations: result.ops,
+        userId,
+      });
+    } catch (err) {
+      this.logger.error(`Failed to record server op for "${docId}"`, err);
+    }
+    this.opBroadcaster?.(docId, result.ops, result.revision);
   }
 
   /**

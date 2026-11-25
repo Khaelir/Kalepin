@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { OTOperation } from '@kalepin/shared';
 import { apply, transform } from './ot-engine';
+import { diffToOps } from './text-diff';
 import WebSocket from 'ws';
 
 interface ClientInfo {
@@ -31,6 +32,8 @@ interface DocumentSession {
   closing: boolean;
   /** Settles when the write in progress, if any, is done. Never rejects. */
   flushing?: Promise<void>;
+  /** Writes started so far, to tell a disk read that raced one of them. */
+  writes: number;
   /** When the oldest edit not yet written was made (ms), or since the last failed write. */
   dirtySince?: number;
 }
@@ -88,6 +91,7 @@ export class OTSessionManager {
         lastFlushedContent: initialContent,
         failedFlushes: 0,
         closing: false,
+        writes: 0,
       };
       this.sessions.set(docId, session);
       this.logger.debug(`New session for "${docId}", content length=${initialContent?.length}`);
@@ -170,6 +174,67 @@ export class OTSessionManager {
     session.dirtySince = undefined;
     session.lastFlushedContent = newContent;
     this.logger.debug(`Reset session "${docId}", rev=${session.revision}, content length=${newContent.length}`);
+  }
+
+  /**
+   * Bring a change made to the note's file without going through the session
+   * (another program, a write that raced the session's start) into the live
+   * content. `read` returns the file's content. Waits for a write of ours in
+   * progress, and reads again when one landed during the read, so the
+   * session's own writes are never taken for outside changes. Resolves to
+   * the op applied to the session, or null when the file holds nothing new.
+   */
+  async mergeFromDisk(
+    docId: string,
+    read: () => Promise<string>,
+  ): Promise<{ ops: OTOperation; revision: number } | null> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let session = this.sessions.get(docId);
+      while (session?.flushing) {
+        await session.flushing;
+        session = this.sessions.get(docId);
+      }
+      if (!session) return null;
+      const writes = session.writes;
+      let disk: string;
+      try {
+        disk = await read();
+      } catch {
+        return null; // Gone or unreadable: the unlink handling decides
+      }
+      if (this.sessions.get(docId) !== session) return null;
+      if (session.flushing || session.writes !== writes) continue;
+      return this.mergeDiskContent(session, disk);
+    }
+    this.logger.warn(`Could not read "${docId}" between writes, external change not merged`);
+    return null;
+  }
+
+  /**
+   * Both the disk change and the session's unsaved edits are diffs of the
+   * content last saved: transform the disk change past the unsaved edits and
+   * apply it as a server op, so neither side is lost.
+   */
+  private mergeDiskContent(
+    session: DocumentSession,
+    disk: string,
+  ): { ops: OTOperation; revision: number } | null {
+    const base = session.lastFlushedContent;
+    if (disk === base) return null;
+    let ops = diffToOps(base, disk)!;
+    const local = diffToOps(base, session.content);
+    if (local) [ops] = transform(ops, local);
+    session.lastFlushedContent = disk;
+
+    let result: { ops: OTOperation; revision: number } | null = null;
+    if (ops.some((c) => c.type !== 'retain')) {
+      result = this.applyOperation(session.docId, ops, session.revision, 0);
+    }
+    // Clean when the merged content is exactly what is on disk.
+    session.dirty = session.content !== disk;
+    if (!session.dirty) session.dirtySince = undefined;
+    this.logger.debug(`Merged disk change into "${session.docId}", rev=${session.revision}, dirty=${session.dirty}`);
+    return result;
   }
 
   addClient(docId: string, ws: WebSocket, userId: number, email: string): void {
@@ -336,6 +401,7 @@ export class OTSessionManager {
     const newContent = session.content;
     let flushDone!: () => void;
     session.flushing = new Promise<void>((resolve) => { flushDone = resolve; });
+    session.writes++;
     try {
       if (this.onFlush) {
         await this.onFlush(docId, newContent);

@@ -173,6 +173,69 @@ describe('OTSessionManager — continuous typing', () => {
   });
 });
 
+describe('OTSessionManager.mergeFromDisk', () => {
+  it('applies a disk change to a session with no unsaved edits', async () => {
+    const session = manager.getOrCreateSession('a.md', 'one\ntwo\n');
+    const result = await manager.mergeFromDisk('a.md', async () => 'one\ntwo\nthree\n');
+
+    assert.ok(result);
+    assert.equal(session.content, 'one\ntwo\nthree\n');
+    assert.equal(session.revision, 1);
+    assert.equal(session.dirty, false, 'the merged content is what is on disk');
+  });
+
+  it('keeps unsaved edits and the disk change, and saves the merge', async () => {
+    const session = manager.getOrCreateSession('a.md', 'top\nmiddle\nbottom\n');
+    manager.addClient('a.md', fakeWs(), 1, 'alice@example.com');
+    manager.applyOperation('a.md', insert('!', 10, 18), 0, 1); // "middle!", not saved yet
+
+    await manager.mergeFromDisk('a.md', async () => 'TOP\nmiddle\nbottom\n');
+
+    assert.equal(session.content, 'TOP\nmiddle!\nbottom\n');
+    assert.equal(session.dirty, true);
+    mock.timers.tick(3_000);
+    await settle();
+    assert.deepEqual(flushed, [{ docId: 'a.md', content: 'TOP\nmiddle!\nbottom\n' }]);
+  });
+
+  it('transforms a client op made before the merge past it', async () => {
+    const session = manager.getOrCreateSession('a.md', 'abc\n');
+    await manager.mergeFromDisk('a.md', async () => 'xyz\nabc\n');
+    // Sent at revision 0, before the client saw the merge.
+    assert.ok(manager.applyOperation('a.md', insert('!', 3, 4), 0, 1));
+    assert.equal(session.content, 'xyz\nabc!\n');
+  });
+
+  it('ignores a file that holds what the session last saved (its own write)', async () => {
+    const session = manager.getOrCreateSession('a.md', 'abc');
+    manager.applyOperation('a.md', insert('d', 3, 3), 0, 1);
+    await manager.flushNow('a.md');
+
+    assert.equal(await manager.mergeFromDisk('a.md', async () => 'abcd'), null);
+    assert.equal(session.revision, 1);
+  });
+
+  it('never takes a write of its own that is still landing for an outside change', async () => {
+    let finishWrite: (() => void) | undefined;
+    manager.setFlushHandler(() => new Promise<void>((resolve) => { finishWrite = resolve; }));
+    const session = manager.getOrCreateSession('a.md', 'abc');
+    manager.applyOperation('a.md', insert('d', 3, 3), 0, 1);
+    const flushing = manager.flushNow('a.md');
+    await settle();
+
+    // A read during the write would see a truncated file.
+    let disk = 'ab';
+    const merging = manager.mergeFromDisk('a.md', async () => disk);
+    disk = 'abcd';
+    finishWrite!();
+    await flushing;
+    const result = await merging;
+
+    assert.equal(result, null);
+    assert.equal(session.content, 'abcd');
+  });
+});
+
 describe('OTSessionManager — closing while a client comes back', () => {
   // The "did a client re-join?" check ran before the close handler (git
   // commit, embedding drain), and the session was deleted after it anyway:
