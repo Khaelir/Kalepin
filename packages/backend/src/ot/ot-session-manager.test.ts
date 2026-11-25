@@ -88,6 +88,60 @@ describe('OTSessionManager — failed final save', () => {
   });
 });
 
+describe('OTSessionManager — edits made while a flush is writing', () => {
+  /** A flush handler whose writes complete only when released, in any order. */
+  function holdWrites() {
+    const writes: Array<{ content: string; release: () => void }> = [];
+    const done: string[] = [];
+    manager.setFlushHandler((_docId, content) => new Promise<void>((resolve) => {
+      writes.push({ content, release: () => { done.push(content); resolve(); } });
+    }));
+    return { writes, done };
+  }
+
+  it('saves an edit typed while the previous save was in flight', async () => {
+    const { writes, done } = holdWrites();
+    manager.getOrCreateSession('a.md', 'abc');
+    manager.addClient('a.md', fakeWs(), 1, 'alice@example.com');
+    manager.applyOperation('a.md', insert('d', 3, 3), 0, 1);
+    mock.timers.tick(3_000); // debounce fires: writing "abcd"
+    await settle();
+    manager.applyOperation('a.md', insert('e', 4, 4), 1, 1); // typed meanwhile
+    writes[0].release();
+    await settle();
+
+    assert.equal(manager.getSession('a.md')!.dirty, true, 'the second edit is not on disk yet');
+    mock.timers.tick(3_000);
+    await settle();
+    writes[1]?.release();
+    await settle();
+
+    assert.deepEqual(done, ['abcd', 'abcde']);
+    assert.equal(manager.getSession('a.md')!.dirty, false);
+  });
+
+  it('never lets an older write land after a newer one', async () => {
+    const { writes, done } = holdWrites();
+    manager.getOrCreateSession('a.md', 'abc');
+    manager.addClient('a.md', fakeWs(), 1, 'alice@example.com');
+    manager.applyOperation('a.md', insert('d', 3, 3), 0, 1);
+    const first = manager.flushNow('a.md');
+    await settle();
+    manager.applyOperation('a.md', insert('e', 4, 4), 1, 1);
+    const second = manager.flushNow('a.md');
+    await settle();
+
+    assert.equal(writes.length, 1, 'the second flush waits for the first write');
+    writes[0].release();
+    await first;
+    await settle();
+    writes[1].release();
+    await second;
+
+    assert.deepEqual(done, ['abcd', 'abcde']);
+  });
+});
+
 describe('OTSessionManager — closing while a client comes back', () => {
   // The "did a client re-join?" check ran before the close handler (git
   // commit, embedding drain), and the session was deleted after it anyway:

@@ -29,6 +29,8 @@ interface DocumentSession {
   failedFlushes: number;
   /** closeSession is running. */
   closing: boolean;
+  /** Settles when the write in progress, if any, is done. Never rejects. */
+  flushing?: Promise<void>;
 }
 
 /** First retry after a failed flush; doubles on each failure up to the cap. */
@@ -306,7 +308,12 @@ export class OTSessionManager {
   }
 
   private async flushToDisk(docId: string): Promise<void> {
-    const session = this.sessions.get(docId);
+    let session = this.sessions.get(docId);
+    // One write per session at a time, so an older content never lands last.
+    while (session?.flushing) {
+      await session.flushing;
+      session = this.sessions.get(docId);
+    }
     if (!session || !session.dirty) {
       this.logger.debug(`Flush skip for "${docId}" — session=${!!session}, dirty=${session?.dirty}`);
       return;
@@ -315,13 +322,17 @@ export class OTSessionManager {
     this.logger.debug(`Flushing "${docId}" to disk, content length=${session.content.length}`);
     const oldContent = session.lastFlushedContent;
     const newContent = session.content;
+    let flushDone!: () => void;
+    session.flushing = new Promise<void>((resolve) => { flushDone = resolve; });
     try {
       if (this.onFlush) {
         await this.onFlush(docId, newContent);
       }
-      session.dirty = false;
+      // Edits made while the write was in flight are not on disk yet.
+      session.dirty = session.content !== newContent;
       session.lastFlushedContent = newContent;
       session.failedFlushes = 0;
+      if (session.dirty && this.sessions.get(docId) === session) this.scheduleDebouncedFlush(docId);
 
       // Trim history to sliding window after successful flush
       const historyWindow = 1000;
@@ -340,6 +351,9 @@ export class OTSessionManager {
       this.onFlushResult?.(docId, false, String(err));
       if (this.sessions.get(docId) === session) this.scheduleFlushRetry(docId);
       throw err;
+    } finally {
+      session.flushing = undefined;
+      flushDone();
     }
     // Capture diff asynchronously (fire-and-forget)
     if (this.onDiffCapture && oldContent !== newContent) {
