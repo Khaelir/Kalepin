@@ -24,6 +24,8 @@ async function bootstrap() {
     logger: resolveLogLevels(logLevel),
   });
   app.useWebSocketAdapter(new WsAdapter(app));
+  // SIGTERM/SIGINT run the shutdown hooks (open notes save their edits).
+  app.enableShutdownHooks();
 
   // Trust the reverse proxy (Traefik in production) so req.protocol /
   // X-Forwarded-* headers reflect the original client request. Required for

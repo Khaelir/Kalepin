@@ -32,7 +32,7 @@ function last(ws: FakeSocket): any {
   return ws.sent[ws.sent.length - 1];
 }
 
-const noopWatcher ={ onFileChange() {}, onPersonalChange() {} } as any;
+const noopWatcher ={ onFileChange() {}, onPersonalChange() {}, onDetectedRename() {} } as any;
 
 let tmpRoot: string;
 let storage: LocalFSAdapter;

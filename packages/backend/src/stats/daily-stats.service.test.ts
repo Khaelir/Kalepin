@@ -118,6 +118,24 @@ describe('DailyStatsService', () => {
     });
   });
 
+  describe('shutdown', () => {
+    // A SIGTERM handler that flushed and called process.exit() cut the
+    // other shutdown hooks short (open notes never got saved).
+    it('flushes in the shutdown hook and leaves the signals to Nest', async () => {
+      const listeners = process.listenerCount('SIGTERM');
+      await service.onModuleInit();
+      try {
+        assert.equal(process.listenerCount('SIGTERM'), listeners, 'no SIGTERM handler of its own');
+        service.trackNoteEdited();
+        await service.beforeApplicationShutdown();
+        const rows = await dailyStatsRepo.find();
+        assert.equal(rows[0].notes_edited, 1);
+      } finally {
+        service.onModuleDestroy();
+      }
+    });
+  });
+
   describe('pruning', () => {
     it('deletes rows older than 90 days', async () => {
       await ds.query(

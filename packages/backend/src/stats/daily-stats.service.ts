@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { BeforeApplicationShutdown, Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -37,12 +37,11 @@ const FLUSH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const FAILED_SEARCH_CAP = 100;
 
 @Injectable()
-export class DailyStatsService implements OnModuleInit, OnModuleDestroy {
+export class DailyStatsService implements OnModuleInit, OnModuleDestroy, BeforeApplicationShutdown {
   private readonly logger = new Logger(DailyStatsService.name);
   private counters: DayCounters = emptyCounters();
   private currentDate: string = todayKey();
   private flushTimer?: ReturnType<typeof setInterval>;
-  private shutdownHandlersBound = false;
 
   constructor(
     @InjectRepository(DailyStats)
@@ -56,15 +55,15 @@ export class DailyStatsService implements OnModuleInit, OnModuleDestroy {
     this.flushTimer = setInterval(() => {
       this.flush().catch((err) => this.logger.error('Failed to flush daily stats', err));
     }, FLUSH_INTERVAL_MS);
+  }
 
-    if (!this.shutdownHandlersBound) {
-      this.shutdownHandlersBound = true;
-      const onShutdown = () => {
-        this.flush().catch(() => {}).finally(() => process.exit());
-      };
-      process.on('SIGTERM', onShutdown);
-      process.on('SIGINT', onShutdown);
-    }
+  /**
+   * Shutdown hook (main.ts enables them): flush while the database is still
+   * open. This used to be a SIGTERM handler that called process.exit(),
+   * which cut the other shutdown hooks short.
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.flush().catch((err) => this.logger.error('Failed to flush daily stats on shutdown', err));
   }
 
   onModuleDestroy() {

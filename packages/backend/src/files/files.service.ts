@@ -41,6 +41,23 @@ export interface MoveHooks {
 }
 
 /**
+ * Notes open in a live editing session. Registered by the OT gateway so
+ * FilesService does not depend on it (same inversion as MoveHooks): reads
+ * and writes of an open note go through its session, not the disk copy,
+ * which lags behind the editors.
+ */
+export interface LiveDocs {
+  /** The note's live content, or undefined when no session holds it. */
+  content(path: string): string | undefined;
+  /**
+   * Apply `edit` (live content in, new content out; it may throw) to the
+   * note's session as an op, send it to the editors and save it. Resolves to
+   * the new content, or null when no session holds `path`.
+   */
+  edit(path: string, edit: (current: string) => string, userId?: number): Promise<string | null>;
+}
+
+/**
  * Receives deletes that should go to the trash. Registered by TrashService so
  * FilesService does not depend on it (same inversion as MoveHooks).
  */
@@ -54,6 +71,7 @@ export class FilesService extends EventEmitter {
   private readonly logger = new Logger(FilesService.name);
   private readonly moveHooks: MoveHooks[] = [];
   private trashHandler: TrashHandler | null = null;
+  private liveDocs: LiveDocs | null = null;
 
   constructor(
     @Inject(STORAGE_ADAPTER) private readonly storage: StorageAdapter,
@@ -116,11 +134,34 @@ export class FilesService extends EventEmitter {
     }
   }
 
+  setLiveDocs(liveDocs: LiveDocs): void {
+    this.liveDocs = liveDocs;
+  }
+
+  /**
+   * Run `edit` through the live session of an open note. Null when the note
+   * isn't open (E2E notes never are): the caller writes to disk.
+   */
+  private async editLive(filePath: string, edit: (current: string) => string, userId?: number): Promise<string | null> {
+    if (!this.liveDocs || isE2EPath(filePath)) return null;
+    return this.liveDocs.edit(filePath, edit, userId);
+  }
+
   async createFile(filePath: string, content: string = '', userId?: number, baseHash?: string, userEmail?: string): Promise<void> {
     if (!filePath.endsWith('.md')) {
       filePath = filePath + '.md';
     }
     if (userEmail) await this.assertWritable(filePath, userEmail);
+
+    // An open note: replace its live content. The session records the change.
+    const live = await this.editLive(filePath, (current) => {
+      this.validateBaseHash(current, baseHash);
+      return content;
+    }, userId);
+    if (live !== null) {
+      this.dailyStatsService?.trackNoteEdited();
+      return;
+    }
 
     // Read existing content for change tracking and base_hash validation
     let oldContent: string | null = null;
@@ -164,22 +205,33 @@ export class FilesService extends EventEmitter {
 
   async patchFile(filePath: string, oldText: string, newText: string, baseHash?: string, userEmail?: string): Promise<void> {
     if (userEmail) await this.assertWritable(filePath, userEmail);
-    const content = await this.readFile(filePath, userEmail);
-    this.validateBaseHash(content, baseHash);
+    const patch = (content: string): string => {
+      this.validateBaseHash(content, baseHash);
 
-    const count = content.split(oldText).length - 1;
-    if (count === 0) {
-      throw new NotFoundException(
-        `Text not found in "${filePath}". The document may have changed — re-read and retry with the correct text.`,
-      );
-    }
-    if (count > 1) {
-      throw new ConflictException(
-        `Found ${count} matches for the provided text in "${filePath}". Include more surrounding context to make the match unique.`,
-      );
+      const count = content.split(oldText).length - 1;
+      if (count === 0) {
+        throw new NotFoundException(
+          `Text not found in "${filePath}". The document may have changed — re-read and retry with the correct text.`,
+        );
+      }
+      if (count > 1) {
+        throw new ConflictException(
+          `Found ${count} matches for the provided text in "${filePath}". Include more surrounding context to make the match unique.`,
+        );
+      }
+
+      return content.replace(oldText, newText);
+    };
+
+    if ((await this.editLive(filePath, patch)) !== null) {
+      this.dailyStatsService?.trackNoteEdited();
+      return;
     }
 
-    const updated = content.replace(oldText, newText);
+    // The disk copy: a session opening meanwhile merges this write as a
+    // change of the file it started from.
+    const content = await this.readNote(filePath, userEmail, false);
+    const updated = patch(content);
     await this.storage.write(filePath, updated);
     await this.announceInternalWrite(filePath, updated);
     this.emit('file:written', { path: filePath });
@@ -195,6 +247,15 @@ export class FilesService extends EventEmitter {
 
   async appendToFile(filePath: string, content: string, separator: string = '\n\n', baseHash?: string, userEmail?: string): Promise<void> {
     if (userEmail) await this.assertWritable(filePath, userEmail);
+    const live = await this.editLive(filePath, (current) => {
+      this.validateBaseHash(current, baseHash);
+      return current + separator + content;
+    });
+    if (live !== null) {
+      this.dailyStatsService?.trackNoteEdited();
+      return;
+    }
+
     let existing: string;
     try {
       existing = await this.storage.read(filePath);
@@ -221,6 +282,15 @@ export class FilesService extends EventEmitter {
   }
 
   async readFile(filePath: string, userEmail?: string): Promise<string> {
+    return this.readNote(filePath, userEmail, true);
+  }
+
+  /**
+   * `live`: for an open note, return its live content, which the disk copy
+   * lags behind (and which a base_hash for a write through the session is
+   * checked against).
+   */
+  private async readNote(filePath: string, userEmail: string | undefined, live: boolean): Promise<string> {
     if (userEmail) await this.assertReadable(filePath, userEmail);
     // E2E paths must go through `/api/files/secure/read` so the client gets
     // the raw envelope (not corrupted UTF-8 from the encrypted blob). This
@@ -229,6 +299,8 @@ export class FilesService extends EventEmitter {
     if (isE2EPath(filePath)) {
       throw new BadRequestException('use /api/files/secure/read for end-to-end encrypted paths');
     }
+    const liveContent = live ? this.liveDocs?.content(filePath) : undefined;
+    if (liveContent !== undefined) return liveContent;
     try {
       return await this.storage.read(filePath);
     } catch {

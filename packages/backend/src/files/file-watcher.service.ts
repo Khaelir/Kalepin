@@ -4,6 +4,7 @@ import { FileChangeEvent } from '@kalepin/shared';
 
 export type FileChangeCallback = (event: FileChangeEvent) => void;
 export type InternalWriteCallback = (path: string, content: string) => void | Promise<void>;
+export type RenameCallback = (oldPath: string, newPath: string) => void;
 
 const DEDUP_TTL_MS = 1000;
 /** Must outlast chokidar latency + the rename-tracking 500ms unlink window. */
@@ -15,6 +16,7 @@ export class FileWatcherService implements OnModuleInit {
   private sharedCallbacks: FileChangeCallback[] = [];
   private personalCallbacks: FileChangeCallback[] = [];
   private internalWriteCallbacks: InternalWriteCallback[] = [];
+  private renameCallbacks: RenameCallback[] = [];
   /**
    * Dedup map keyed by virtual path. The mtime field is the disk mtime of the
    * file written by the internal-write code path, captured *after* the storage
@@ -82,6 +84,24 @@ export class FileWatcherService implements OnModuleInit {
         this.logger.warn(
           `internal-write subscriber threw for "${virtualPath}": ${(err as Error).message}`,
         );
+      }
+    }
+  }
+
+  /**
+   * Subscribe to renames detected on disk: an unlink paired with an add by
+   * RenameTrackingService. Includes Kalepin's own moves (see isSelfCaused).
+   */
+  onDetectedRename(callback: RenameCallback): void {
+    this.renameCallbacks.push(callback);
+  }
+
+  emitDetectedRename(oldPath: string, newPath: string): void {
+    for (const cb of this.renameCallbacks) {
+      try {
+        cb(oldPath, newPath);
+      } catch (err) {
+        this.logger.warn(`rename subscriber threw for "${oldPath}": ${(err as Error).message}`);
       }
     }
   }

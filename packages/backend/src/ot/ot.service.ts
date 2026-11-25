@@ -1,9 +1,10 @@
-import { Injectable, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
+import { BeforeApplicationShutdown, Injectable, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import WebSocket from 'ws';
 import { OTOperation } from '@kalepin/shared';
 import { OTSessionManager } from './ot-session-manager';
+import { diffToOps } from './text-diff';
 import { OTOperationHistory } from '../entities';
 import { STORAGE_ADAPTER, StorageAdapter } from '../storage';
 import { ChangeTrackingService } from '../changes';
@@ -11,11 +12,15 @@ import { DailyStatsService } from '../stats/daily-stats.service';
 import { DocMentionService } from '../comments/doc-mention.service';
 import { FileWatcherService } from '../files/file-watcher.service';
 
+/** How long shutdown waits for open notes to save (Docker kills after 10 s). */
+const SHUTDOWN_FLUSH_TIMEOUT_MS = 5_000;
+
 @Injectable()
-export class OTService {
+export class OTService implements BeforeApplicationShutdown {
   private readonly logger = new Logger(OTService.name);
   readonly sessionManager = new OTSessionManager();
   private sessionCloseListeners: Array<(docId: string) => Promise<void> | void> = [];
+  private opBroadcaster?: (docId: string, ops: OTOperation, revision: number) => void;
 
   constructor(
     @Inject(STORAGE_ADAPTER) private readonly storage: StorageAdapter,
@@ -88,17 +93,48 @@ export class OTService {
     this.sessionCloseListeners.push(handler);
   }
 
+  /**
+   * On SIGTERM (a deploy) open notes hold up to 15 s of acked edits that are
+   * only in memory: save them while the database is still open.
+   */
+  async beforeApplicationShutdown(): Promise<void> {
+    await this.sessionManager.flushAll(SHUTDOWN_FLUSH_TIMEOUT_MS);
+  }
+
+  /** How ops the server applies itself (merged disk changes, server-side writes) reach a doc's clients. */
+  setOpBroadcaster(broadcaster: (docId: string, ops: OTOperation, revision: number) => void): void {
+    this.opBroadcaster = broadcaster;
+  }
+
+  /**
+   * Join `ws` to the live session of `docId`, starting one from disk if
+   * needed. Resolves to null when `docId` is not a note that can be edited
+   * as text (a folder, a file that can't be read or decrypted, a binary
+   * file): a session there would overwrite it on its first flush.
+   */
   async openDocument(
     docId: string,
     ws: WebSocket,
     userId: number,
     email: string,
-  ): Promise<{ content: string; revision: number }> {
+  ): Promise<{ content: string; revision: number } | null> {
     let content = '';
-    try {
-      content = await this.storage.read(docId);
-    } catch {
-      // New document
+    if (!this.sessionManager.getSession(docId)) {
+      try {
+        content = await this.storage.read(docId);
+      } catch (err) {
+        // Only "no such file" means a new document. Any other failure (a
+        // folder, no permission, a wrong key or a tampered envelope) is a
+        // note we can't see: an empty session would overwrite it.
+        if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          this.logger.warn(`Refusing to open "${docId}": ${(err as Error)?.message ?? err}`);
+          return null;
+        }
+      }
+      if (content.includes('\u0000')) {
+        this.logger.warn(`Refusing to open "${docId}": binary content`);
+        return null;
+      }
     }
     this.logger.debug(`Opening "${docId}", disk content length=${content.length}`);
 
@@ -133,17 +169,12 @@ export class OTService {
     const renamed: Array<{ from: string; to: string; displaced: WebSocket[] }> = [];
     for (const from of this.sessionManager.sessionIdsAtOrUnder(src)) {
       const to = dest + from.slice(src.length);
+      // The move may have rewritten the file (attachment paths): merge that
+      // into the session while it still has the id its clients use, so the
+      // op reaches them and edits made since the pre-move flush are kept.
+      await this.mergeExternalChange(from, to);
       const result = this.sessionManager.renameSession(from, to);
       if (!result) continue;
-      const session = this.sessionManager.getSession(to);
-      if (session && !session.dirty) {
-        try {
-          const content = await this.storage.read(to);
-          if (content !== session.content) this.sessionManager.resetContent(to, content);
-        } catch {
-          // Unreadable right after the move — keep the in-memory content.
-        }
-      }
       renamed.push({ from, to, displaced: result.displaced });
     }
     return renamed;
@@ -177,21 +208,96 @@ export class OTService {
     return dropped;
   }
 
-  async handleExternalWrite(docId: string): Promise<WebSocket[] | null> {
+  /**
+   * The file of an open note changed without going through its session
+   * (another program, a write that raced the session's start, a trash
+   * restore). Merge the change into the live content and send it to the
+   * clients as an op, keeping their unsaved edits. `diskPath` is where the
+   * file is now, when it moved under the session.
+   */
+  async mergeExternalChange(docId: string, diskPath: string = docId): Promise<void> {
+    try {
+      const result = await this.sessionManager.mergeFromDisk(docId, () => this.storage.read(diskPath));
+      if (result) await this.publishServerOp(docId, result, 0);
+    } catch (err) {
+      this.logger.error(`Failed to merge the disk change of "${docId}"`, err);
+    }
+  }
+
+  /**
+   * The file of an open note vanished from disk (flushes held since) and the
+   * settle window passed without a rename taking the session elsewhere. If
+   * the file is back (an editor saving by delete + re-create), merge it and
+   * resume flushing. If it is still gone, another program deleted it: drop
+   * the session without writing it back, which would re-create the file.
+   * Resolves to the dropped session's clients, else null.
+   */
+  async settleExternalUnlink(docId: string): Promise<WebSocket[] | null> {
+    try {
+      if (!this.sessionManager.getSession(docId)) return null;
+      const back = await this.storage.exists(docId);
+      if (!this.sessionManager.getSession(docId)) return null;
+      if (back) {
+        this.sessionManager.releaseFlushes(docId);
+        await this.mergeExternalChange(docId);
+        return null;
+      }
+      const dropped = this.sessionManager.discardSession(docId);
+      if (!dropped) return null;
+      if (dropped.unflushed !== null) {
+        this.logger.warn(`"${docId}" was deleted outside Kalepin with unsaved edits in its session; they were not written back`);
+      }
+      return dropped.clients;
+    } catch (err) {
+      this.logger.error(`Failed to settle the removal of "${docId}"`, err);
+      return null;
+    }
+  }
+
+  /**
+   * A server-side write (MCP, REST) to a note with a live session: `edit`
+   * gets the live content and returns the new one, and may throw (a stale
+   * base hash, text not found). The change is applied as an op at the
+   * current revision, so editors keep their pending edits, sent to the
+   * clients and saved. Edits made before it are saved first, so the note's
+   * history shows the write as a change of its own. Resolves to the new
+   * content, or null when no session holds `docId` (write to disk then).
+   */
+  async applyServerEdit(docId: string, edit: (current: string) => string, userId?: number): Promise<string | null> {
+    if (!this.sessionManager.getSession(docId)) return null;
+    // A failed flush is logged and retried by the session manager.
+    await this.sessionManager.flushNow(docId).catch(() => undefined);
     const session = this.sessionManager.getSession(docId);
     if (!session) return null;
 
-    let content = '';
-    try {
-      content = await this.storage.read(docId);
-    } catch {
-      return null;
+    const before = session.content;
+    const after = edit(before);
+    const ops = diffToOps(before, after);
+    if (ops) {
+      const result = this.sessionManager.applyOperation(docId, ops, session.revision, userId ?? 0);
+      if (result) await this.publishServerOp(docId, result, userId ?? 0);
     }
+    await this.sessionManager.flushNow(docId).catch(() => undefined);
+    return after;
+  }
 
-    this.sessionManager.resetContent(docId, content);
-
-    const clients = this.sessionManager.getClients(docId);
-    return clients ? Array.from(clients.keys()) : [];
+  /**
+   * Record an op the server applied to a session itself, then send it to the
+   * session's clients. The send waits for the history row, as for client
+   * ops, so frames keep revision order.
+   */
+  private async publishServerOp(docId: string, result: { ops: OTOperation; revision: number }, userId: number): Promise<void> {
+    try {
+      await this.historyRepo.save({
+        documentId: docId,
+        revision: result.revision,
+        operations: result.ops,
+        userId,
+      });
+    } catch (err) {
+      this.logger.error(`Failed to record server op for "${docId}"`, err);
+    }
+    this.opBroadcaster?.(docId, result.ops, result.revision);
   }
 
   /**

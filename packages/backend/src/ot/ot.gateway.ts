@@ -7,7 +7,7 @@ import {
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
-import { UseGuards, Inject, Logger, Optional, forwardRef } from '@nestjs/common';
+import { UseGuards, Inject, Logger, OnModuleDestroy, Optional, forwardRef } from '@nestjs/common';
 import * as WebSocket from 'ws';
 import { Server } from 'ws';
 import { IncomingMessage } from 'http';
@@ -36,6 +36,7 @@ import { AccessLogService } from '../access-log/access-log.service';
 import { DocHandlesService } from '../doc-handles/doc-handles.service';
 import { PinService } from '../pin/pin.service';
 import { NotificationInboxService } from '../notifications/notification-inbox.service';
+import { GrantsService } from '../grants/grants.service';
 
 interface AuthenticatedWebSocket extends WebSocket {
   user?: JwtPayload;
@@ -44,13 +45,25 @@ interface AuthenticatedWebSocket extends WebSocket {
   cookieHeader?: string;
   /** Docs this socket opened through the doc:open gates (PIN included). */
   openedDocs?: Set<string>;
+  /** Settles when this socket's doc:open in progress, if any, is done. */
+  openQueue?: Promise<void>;
 }
 
 /** How long ops sent under a renamed doc's old id are still routed to the new one. */
 const MOVED_ALIAS_TTL_MS = 30_000;
 
+/**
+ * How long an open note's file may be missing before it counts as deleted:
+ * longer than the rename correlator's pairing (300 ms + content match) and
+ * an editor's delete + re-create save.
+ */
+const EXTERNAL_UNLINK_SETTLE_MS = 1_000;
+
+/** How often grantees in live sessions are re-checked, for grants that expire. */
+const GRANT_RECHECK_MS = 30_000;
+
 @WebSocketGateway({ path: '/ws' })
-export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   private readonly logger = new Logger(OTGateway.name);
 
   @WebSocketServer()
@@ -68,6 +81,8 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
    */
   private movedDocIds = new Map<string, { to: string; expiresAt: number }>();
 
+  private grantRecheck?: ReturnType<typeof setInterval>;
+
   constructor(
     private readonly otService: OTService,
     private readonly authService: AuthService,
@@ -80,7 +95,16 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly pinService: PinService,
     @Optional() @Inject(forwardRef(() => LinkIndexService)) private readonly linkIndexService?: LinkIndexService,
     @Optional() private readonly notificationInbox?: NotificationInboxService,
+    @Optional() private readonly grants?: GrantsService,
   ) {
+    // A grantee keeps receiving live edits only while their grant lets them
+    // open the doc: re-check when a grant changes, and now and then for
+    // grants that simply expired.
+    if (this.grants) {
+      this.grants.onChange((path) => this.revalidateClientsUnder(path));
+      this.grantRecheck = setInterval(() => this.revalidateGranteeClients(), GRANT_RECHECK_MS);
+      this.grantRecheck.unref?.();
+    }
     // Wire OT broadcast so rename-rewriting can push ops to clients
     this.linkIndexService?.setOTBroadcast((docId, ops, rev) => {
       this.broadcastToDocClients(docId, {
@@ -96,17 +120,15 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       // for `<path>.tmp.<hex>` before renaming into place. Those are an
       // implementation detail and must never reach clients.
       if (isAtomicWriteTmpPath(event.path)) return;
-      if (event.event === 'change' || (event.event === 'add' && event.path.endsWith('.md'))) {
-        // Skip broadcast if an OT session owns this document — the change
-        // was caused by the OT flush, not an external editor.
-        if (this.otService.sessionManager.getSession(event.path)) {
-          return;
-        }
+      if (this.mergeIfOpen(event)) {
+        // Merged into the live session; its clients get the change as an op.
+      } else if (event.event === 'change' || (event.event === 'add' && event.path.endsWith('.md'))) {
         this.broadcastToDocClients(event.path, {
           type: 'file:changed',
           path: event.path,
         });
       }
+      if (event.event === 'unlink') this.handleDiskUnlink(event.path);
       // Broadcast file tree updates for add/delete events.
       // Shared-vault paths are visible to every authenticated user, so plain
       // broadcast is safe here (the personal subtree never produces shared events).
@@ -124,13 +146,15 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (isAtomicWriteTmpPath(event.path)) return;
       const email = this.extractPersonalOwnerEmail(event.path);
       if (!email) return;
-      if (event.event === 'change' || (event.event === 'add' && event.path.endsWith('.md'))) {
-        if (this.otService.sessionManager.getSession(event.path)) return;
+      if (this.mergeIfOpen(event)) {
+        // Merged into the live session; its clients get the change as an op.
+      } else if (event.event === 'change' || (event.event === 'add' && event.path.endsWith('.md'))) {
         this.fanoutToEmail(email, {
           type: 'file:changed',
           path: event.path,
         });
       }
+      if (event.event === 'unlink') this.handleDiskUnlink(event.path);
       if (['add', 'unlink', 'addDir', 'unlinkDir'].includes(event.event)) {
         this.fanoutToEmail(email, {
           type: 'file:tree-update',
@@ -163,18 +187,74 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.fanoutToEmail(email, { type: 'notifications:changed' });
     });
 
-    // Subscribe to external file writes (e.g. MCP)
-    this.filesService.on('file:written', async (payload: { path: string }) => {
-      const clients = await this.otService.handleExternalWrite(payload.path);
-      if (clients && clients.length > 0) {
-        const data = JSON.stringify({ type: 'doc:reload', path: payload.path });
-        for (const ws of clients) {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(data);
-          }
-        }
-      }
+    // Ops the server applies to a session itself (merged disk changes,
+    // server-side writes) reach its clients like any collaborator's op.
+    this.otService.setOpBroadcaster((docId, ops, rev) => {
+      this.broadcastToDocClients(docId, { type: 'op', docId, ops, rev });
     });
+
+    // Server-side reads and writes of an open note (MCP, REST) use its live
+    // content: a write lands as an op instead of under the editors on disk.
+    this.filesService.setLiveDocs({
+      content: (path) => this.otService.sessionManager.getContent(path),
+      edit: (path, edit, userId) => this.otService.applyServerEdit(path, edit, userId),
+    });
+
+    // A write that went to disk under an open note (a session that started
+    // while it was being written, a trash restore onto an open path): merge
+    // it into the live doc rather than resetting it, which dropped unsaved edits.
+    this.filesService.on('file:written', (payload: { path: string }) => {
+      void this.otService.mergeExternalChange(payload.path);
+    });
+
+    // Another program renamed a file under an open note (the watcher paired
+    // its unlink and add): the session follows it, as for a Kalepin rename.
+    this.fileWatcher.onDetectedRename((from, to) => {
+      // FilesService.move: its afterMove hook follows the rename.
+      if (this.fileWatcher.isSelfCaused(from)) return;
+      if (this.otService.sessionManager.sessionIdsAtOrUnder(from).length === 0) return;
+      this.followRename(from, to).catch((err) => {
+        this.logger.error(`Failed to follow the rename of "${from}" to "${to}"`, err);
+      });
+    });
+  }
+
+  /**
+   * The file of an open note vanished from disk. Kalepin's own moves, trash
+   * and deletes are handled by the move/trash hooks. Anything else is another
+   * program deleting or renaming it, or an editor saving by delete +
+   * re-create: hold the session's flushes, which would re-create the file,
+   * until the rename correlator and the re-create have had time to show up.
+   */
+  private handleDiskUnlink(path: string): void {
+    if (!this.otService.sessionManager.getSession(path) || this.fileWatcher.isSelfCaused(path)) return;
+    this.otService.sessionManager.holdFlushes(path);
+    setTimeout(() => void this.settleDiskUnlink(path), EXTERNAL_UNLINK_SETTLE_MS);
+  }
+
+  /** Still gone and not renamed: deleted. Editors reload the path, now empty. */
+  private async settleDiskUnlink(path: string): Promise<void> {
+    const clients = await this.otService.settleExternalUnlink(path);
+    if (!clients) return;
+    this.movedDocIds.delete(path);
+    const frame = JSON.stringify({ type: 'doc:reload', path });
+    for (const ws of clients) {
+      const client = ws as AuthenticatedWebSocket;
+      if (client.docId === path) client.docId = undefined;
+      if (client.readyState === WebSocket.OPEN) client.send(frame);
+    }
+  }
+
+  /**
+   * A watcher change or add on a note with a live session: the session's own
+   * writes are filtered out (mtime dedup, then by content in the merge), so
+   * this is another program's edit. Merge it, or the next flush would undo it.
+   */
+  private mergeIfOpen(event: { event: string; path: string }): boolean {
+    if (event.event !== 'change' && event.event !== 'add') return false;
+    if (!this.otService.sessionManager.getSession(event.path)) return false;
+    void this.otService.mergeExternalChange(event.path);
+    return true;
   }
 
   async handleConnection(client: AuthenticatedWebSocket, req: IncomingMessage) {
@@ -237,11 +317,20 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('doc:open')
-  async handleDocOpen(
+  handleDocOpen(
     @ConnectedSocket() client: AuthenticatedWebSocket,
     @MessageBody() data: { docId: string; unlock?: string },
-  ) {
-    if (!client.user) return;
+  ): Promise<void> {
+    // One open at a time per socket. The WS adapter runs handlers
+    // concurrently, and two overlapping opens each read client.docId after
+    // their awaits, leaving the socket joined to both sessions.
+    const open = (client.openQueue ?? Promise.resolve()).then(() => this.openDoc(client, data));
+    client.openQueue = open.catch(() => undefined);
+    return open;
+  }
+
+  private async openDoc(client: AuthenticatedWebSocket, data: { docId: string; unlock?: string }): Promise<void> {
+    if (!client.user || client.readyState !== WebSocket.OPEN) return;
 
     // Visibility gate — foreign personal docIds are non-observable.
     // Reject without opening, send a not_found error frame; do not close the
@@ -291,14 +380,27 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (previousDocId && previousDocId !== data.docId) {
       this.logger.debug(`Removing client from previous session "${previousDocId}"`);
       this.otService.sessionManager.removeClient(previousDocId, client);
+      client.docId = undefined;
     }
 
-    const { content, revision } = await this.otService.openDocument(
+    const opened = await this.otService.openDocument(
       data.docId,
       client,
       client.user.sub,
       client.user.email,
     );
+    if (!opened) {
+      // A folder or a file that isn't text: the client falls back to REST.
+      client.send(JSON.stringify({ type: 'error', code: 'not_found', docId: data.docId }));
+      return;
+    }
+    if (client.readyState !== WebSocket.OPEN) {
+      // The socket closed while the note loaded. handleDisconnect has already
+      // run and can't see this session: leave it, or it never closes.
+      this.otService.sessionManager.removeClient(data.docId, client);
+      return;
+    }
+    const { content, revision } = opened;
 
     client.docId = data.docId;
     (client.openedDocs ??= new Set()).add(data.docId);
@@ -378,7 +480,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
 
     if (!result) {
-      client.send(JSON.stringify({ type: 'error', message: 'Operation rejected' }));
+      client.send(JSON.stringify({ type: 'error', docId: data.docId, message: 'Operation rejected' }));
       return;
     }
 
@@ -488,6 +590,8 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: { docId: string },
   ) {
     if (!client.user) return;
+    // Only a socket in the doc's session may force a save of it.
+    if (!this.isJoined(client, data.docId)) return;
     try {
       await this.otService.sessionManager.flushNow(data.docId);
       // The flushResultHandler already broadcasts to all clients;
@@ -504,6 +608,9 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: { docId: string; cursor: number | null; selection: unknown },
   ) {
     if (!client.user) return;
+    // Only a socket in the doc's session may announce itself there; anyone
+    // else could push their email and a selection into a private note.
+    if (!this.isJoined(client, data.docId)) return;
 
     this.broadcastToDocClients(data.docId, {
       type: 'presence',
@@ -513,6 +620,65 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
       cursor: data.cursor,
       selection: data.selection,
     }, client);
+  }
+
+  onModuleDestroy(): void {
+    if (this.grantRecheck) clearInterval(this.grantRecheck);
+  }
+
+  /** A grant on `path` changed: re-check the clients of the sessions it covers. */
+  private revalidateClientsUnder(path: string): void {
+    for (const docId of this.otService.sessionManager.sessionIdsAtOrUnder(path)) {
+      this.revalidateDocClients(docId).catch((err) => {
+        this.logger.error(`Failed to re-check the clients of "${docId}"`, err);
+      });
+    }
+  }
+
+  /** Grants only open other users' personal notes: re-check the clients of those. */
+  private revalidateGranteeClients(): void {
+    for (const { docId } of this.otService.sessionManager.getActiveSessions()) {
+      if (!isUnderPersonalRoot(docId)) continue;
+      this.revalidateDocClients(docId).catch((err) => {
+        this.logger.error(`Failed to re-check the clients of "${docId}"`, err);
+      });
+    }
+  }
+
+  /**
+   * Apply the doc:open gate again to every client of `docId`. A grantee
+   * whose grant was revoked, expired or lowered to read is removed from the
+   * session (no more ops or presence) and gets the error frame doc:open
+   * would have sent.
+   */
+  private async revalidateDocClients(docId: string): Promise<void> {
+    const clients = this.otService.sessionManager.getClients(docId);
+    for (const [ws, info] of clients ? [...clients] : []) {
+      const v = await this.visibility.visibilityFor(docId, info.email.toLowerCase());
+      if (v.kind === 'owner' || (v.kind === 'grant' && v.permission !== 'read')) continue;
+      this.evictClient(docId, ws as AuthenticatedWebSocket, v.kind === 'grant' ? 'forbidden' : 'not_found');
+    }
+  }
+
+  private evictClient(docId: string, client: AuthenticatedWebSocket, code: 'forbidden' | 'not_found'): void {
+    if (!this.isJoined(client, docId)) return;
+    this.logger.log(`Removing ${client.user?.email} from "${docId}": access revoked`);
+    this.otService.sessionManager.removeClient(docId, client);
+    if (client.docId === docId) client.docId = undefined;
+    client.openedDocs?.delete(docId);
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({ type: 'error', code, docId }));
+    }
+    this.broadcastToDocClients(docId, {
+      type: 'presence:leave',
+      docId,
+      userId: String(client.user?.sub),
+    });
+  }
+
+  /** True when `client` is in the live session of `docId`, i.e. passed its doc:open. */
+  private isJoined(client: AuthenticatedWebSocket, docId: string): boolean {
+    return !!this.otService.sessionManager.getClients(docId)?.has(client);
   }
 
   private broadcastToDocClients(docId: string, message: unknown, exclude?: WebSocket): void {
