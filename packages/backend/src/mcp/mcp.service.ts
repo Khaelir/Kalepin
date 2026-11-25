@@ -900,7 +900,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           if (this.encryptionPredicates.isE2EEncrypted(notePath)) {
             return { content: [{ type: 'text' as const, text: `kind: e2e-encrypted\npath: ${notePath}\nThe server keeps no content history for end-to-end encrypted notes.` }] };
           }
-          const history = await versionHistory.getHistory(notePath);
+          const history = await versionHistory.getHistory(notePath, email);
           const changes = history.slice(0, limit ?? 20).map((h) => ({
             change_id: h.id,
             action: h.action,
@@ -934,11 +934,11 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           if (this.encryptionPredicates.isE2EEncrypted(notePath)) {
             return { content: [{ type: 'text' as const, text: `kind: e2e-encrypted\npath: ${notePath}\nThe server keeps no content history for end-to-end encrypted notes.` }] };
           }
-          const change = (await versionHistory.getHistory(notePath)).find((h) => h.id === change_id);
+          const change = (await versionHistory.getHistory(notePath, email)).find((h) => h.id === change_id);
           if (!change) {
             return { content: [{ type: 'text' as const, text: `No change ${change_id} in the history of ${notePath}. Use note_history to list its changes.` }] };
           }
-          const { content, partial } = await versionHistory.reconstructVersion(notePath, change_id);
+          const { content, partial } = await versionHistory.reconstructVersion(notePath, change_id, email);
           const header = [
             `path: ${notePath}`,
             `change_id: ${change_id}`,
@@ -1208,13 +1208,13 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           }
           // Before the snapshot below, so a read-only grant leaves no history row behind.
           await this.filesService.assertWritable(notePath, email);
-          const change = (await versionHistory.getHistory(notePath)).find((h) => h.id === change_id);
+          const change = (await versionHistory.getHistory(notePath, email)).find((h) => h.id === change_id);
           if (!change) {
             return { content: [{ type: 'text' as const, text: `No change ${change_id} in the history of ${notePath}. Use note_history to list its changes.` }] };
           }
           const current = await this.filesService.readFile(notePath, email);
           this.filesService.validateBaseHash(current, base_hash);
-          const { content: restored, partial } = await versionHistory.reconstructVersion(notePath, change_id);
+          const { content: restored, partial } = await versionHistory.reconstructVersion(notePath, change_id, email);
           if (partial) {
             throw new Error(`Change ${change_id} of ${notePath} cannot be rebuilt exactly (a step in its history no longer applies), so nothing was restored. read_version shows the partial text.`);
           }

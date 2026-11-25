@@ -257,7 +257,7 @@ export class FilesController {
     // History rows hold past note content, so they get the same gates as a read.
     await this.filesService.assertReadable(path, req.user.email);
     await this.pinService.assertUnlockedForRequest(req, path, req.user.email);
-    return this.versionHistory.getHistory(path);
+    return this.versionHistory.getHistory(path, req.user.email);
   }
 
   @Get('version')
@@ -273,7 +273,7 @@ export class FilesController {
     if (isNaN(changeId)) throw new BadRequestException('changeId must be a number');
     await this.filesService.assertReadable(path, req.user.email);
     await this.pinService.assertUnlockedForRequest(req, path, req.user.email);
-    return this.versionHistory.reconstructVersion(path, changeId);
+    return this.versionHistory.reconstructVersion(path, changeId, req.user.email);
   }
 
   @Post('restore')
@@ -287,7 +287,7 @@ export class FilesController {
     await this.filesService.assertWritable(body.path, req.user.email);
     await this.pinService.assertUnlockedForRequest(req, body.path, req.user.email);
 
-    const { content: historicalContent, partial } = await this.versionHistory.reconstructVersion(body.path, body.changeId);
+    const { content: historicalContent, partial } = await this.versionHistory.reconstructVersion(body.path, body.changeId, req.user.email);
     if (partial) {
       throw new UnprocessableEntityException('Cannot restore: version reconstruction failed due to corrupted diff chain');
     }
