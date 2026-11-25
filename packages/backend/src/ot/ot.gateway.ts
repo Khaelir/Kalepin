@@ -291,14 +291,21 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (previousDocId && previousDocId !== data.docId) {
       this.logger.debug(`Removing client from previous session "${previousDocId}"`);
       this.otService.sessionManager.removeClient(previousDocId, client);
+      client.docId = undefined;
     }
 
-    const { content, revision } = await this.otService.openDocument(
+    const opened = await this.otService.openDocument(
       data.docId,
       client,
       client.user.sub,
       client.user.email,
     );
+    if (!opened) {
+      // A folder or a file that isn't text: the client falls back to REST.
+      client.send(JSON.stringify({ type: 'error', code: 'not_found', docId: data.docId }));
+      return;
+    }
+    const { content, revision } = opened;
 
     client.docId = data.docId;
     (client.openedDocs ??= new Set()).add(data.docId);

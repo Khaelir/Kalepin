@@ -88,17 +88,34 @@ export class OTService {
     this.sessionCloseListeners.push(handler);
   }
 
+  /**
+   * Join `ws` to the live session of `docId`, starting one from disk if
+   * needed. Resolves to null when `docId` is not a note that can be edited
+   * as text (a folder, an unreadable or binary file): a session there would
+   * overwrite it on its first flush.
+   */
   async openDocument(
     docId: string,
     ws: WebSocket,
     userId: number,
     email: string,
-  ): Promise<{ content: string; revision: number }> {
+  ): Promise<{ content: string; revision: number } | null> {
     let content = '';
-    try {
-      content = await this.storage.read(docId);
-    } catch {
-      // New document
+    if (!this.sessionManager.getSession(docId)) {
+      try {
+        content = await this.storage.read(docId);
+      } catch {
+        // Nothing there yet: a new document. Something that exists but can't
+        // be read is not a note.
+        if (await this.storage.exists(docId)) {
+          this.logger.warn(`Refusing to open "${docId}": it exists but can't be read as a note`);
+          return null;
+        }
+      }
+      if (content.includes('\u0000')) {
+        this.logger.warn(`Refusing to open "${docId}": binary content`);
+        return null;
+      }
     }
     this.logger.debug(`Opening "${docId}", disk content length=${content.length}`);
 
