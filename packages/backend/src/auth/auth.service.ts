@@ -9,6 +9,7 @@ import { MagicLinkToken } from '../entities/magic-link-token.entity';
 import { ApiKey } from '../entities/api-key.entity';
 import { OAuthEventBus } from './oauth/oauth.events';
 import { canonicalizeEmail } from './email';
+import { isAdmin } from './admin.util';
 import { resolveJwtSecret } from './jwt-secret';
 import { safeReturnPath } from './return-to';
 import { parseDomainAllowlist, isEmailDomainAllowed } from './domain-allowlist';
@@ -251,6 +252,10 @@ export class AuthService implements OnModuleInit {
       // A non-canonical user.email in DB indicates pre-canon legacy data; reject.
       throw new UnauthorizedException('Invalid API key');
     }
-    return { sub: apiKey.userId, email, scope: apiKey.scope ?? 'rw', apiKeyId: apiKey.id };
+    // ADMIN_EMAILS is checked when an admin key is created, and again on every
+    // use: a key made by a former admin acts as a plain read-write key.
+    const stored = apiKey.scope ?? 'rw';
+    const scope = stored === 'admin' && !isAdmin(email) ? 'rw' : stored;
+    return { sub: apiKey.userId, email, scope, apiKeyId: apiKey.id };
   }
 }
