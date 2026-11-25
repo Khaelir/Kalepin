@@ -29,6 +29,8 @@ import {
   WrongKEKError,
 } from '../crypto/envelope';
 import { skipSweepEntry } from '../encryption/sweep-entry-filter';
+import { isE2EPath, isE2ETombstonePath } from '../crypto/encryption-predicates';
+import { PERSONAL_PREFIX } from '../auth/visibility';
 
 interface Args {
   newKekFile: string;
@@ -102,7 +104,7 @@ async function atomicWrite(absPath: string, content: Buffer): Promise<void> {
   await fsp.rename(tmp, absPath);
 }
 
-interface ZoneRoot {
+export interface ZoneRoot {
   zone: 'personal' | 'shared';
   root: string;
   /** Skip the reserved `_users/` segment under the shared root. */
@@ -122,18 +124,26 @@ function resolveZoneRoots(): ZoneRoot[] {
   return roots;
 }
 
-async function rotateRoot(
+export async function rotateRoot(
   zr: ZoneRoot,
   oldKek: KEKSource,
   newKek: KEKSource,
-): Promise<{ rewrapped: number; skipped: number; passthrough: number }> {
+): Promise<{ rewrapped: number; skipped: number; passthrough: number; endToEnd: number }> {
   let rewrapped = 0;
   let skipped = 0;
   let passthrough = 0;
+  let endToEnd = 0;
 
   for await (const rel of walk(zr.root, zr.zone)) {
     if (zr.skipUsersAtRoot && rel.startsWith('_users/')) continue;
     if (zr.skipUsersAtRoot && rel === '_users') continue;
+    // `_secure/` and vault-reset tombstones are wrapped by the user's
+    // master-KEK, which the server never holds: nothing to rotate.
+    const virtualPath = zr.zone === 'personal' ? `${PERSONAL_PREFIX}${rel}` : rel;
+    if (isE2EPath(virtualPath) || isE2ETombstonePath(virtualPath)) {
+      endToEnd++;
+      continue;
+    }
     const abs = path.join(zr.root, rel);
 
     let raw: Buffer;
@@ -176,7 +186,7 @@ async function rotateRoot(
     }
   }
 
-  return { rewrapped, skipped, passthrough };
+  return { rewrapped, skipped, passthrough, endToEnd };
 }
 
 function updateZoneFingerprints(dbPath: string, newFp: Buffer): void {
@@ -240,7 +250,7 @@ async function main(): Promise<void> {
     console.log(`[rotate-kek] walking zone=${zr.zone} root=${zr.root}`);
     const stats = await rotateRoot(zr, oldKek, newKek);
     console.log(
-      `[rotate-kek] zone=${zr.zone} rewrapped=${stats.rewrapped} skipped=${stats.skipped} passthrough=${stats.passthrough}`,
+      `[rotate-kek] zone=${zr.zone} rewrapped=${stats.rewrapped} skipped=${stats.skipped} passthrough=${stats.passthrough} end-to-end=${stats.endToEnd}`,
     );
     totalRewrapped += stats.rewrapped;
     totalSkipped += stats.skipped;
@@ -262,7 +272,9 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((err) => {
-  console.error(`[rotate-kek] fatal: ${(err as Error).message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`[rotate-kek] fatal: ${(err as Error).message}`);
+    process.exit(1);
+  });
+}
