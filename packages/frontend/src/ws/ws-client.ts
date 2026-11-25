@@ -5,6 +5,7 @@ export class WSClient {
   private handlers = new Map<string, Set<MessageHandler>>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private url: string;
   private token: string;
   private readyResolve: (() => void) | null = null;
@@ -14,6 +15,8 @@ export class WSClient {
   private reconnectDelay = 2000;
   private static readonly RECONNECT_BASE = 2000;
   private static readonly RECONNECT_MAX = 30000;
+  private static readonly HEARTBEAT_INTERVAL = 30000;
+  private static readonly PONG_TIMEOUT = 10000;
 
   constructor(token: string) {
     this.token = token;
@@ -33,9 +36,10 @@ export class WSClient {
   }
 
   connect(): void {
-    this.ws = new WebSocket(this.url);
+    const ws = new WebSocket(this.url);
+    this.ws = ws;
 
-    this.ws.onopen = () => {
+    ws.onopen = () => {
       this._connected = true;
       this.reconnectDelay = WSClient.RECONNECT_BASE; // reset backoff
 
@@ -50,7 +54,9 @@ export class WSClient {
       this._wasConnected = true;
     };
 
-    this.ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      // Any frame shows the socket is alive
+      this.clearPongTimer();
       try {
         const msg = JSON.parse(event.data as string);
         const type = msg.type as string;
@@ -60,22 +66,24 @@ export class WSClient {
       }
     };
 
-    this.ws.onclose = () => {
-      const wasConnected = this._connected;
-      this._connected = false;
-      this.stopHeartbeat();
+    ws.onclose = () => this.handleClose();
 
-      // Emit disconnected lifecycle event (only if we were previously connected)
-      if (wasConnected) {
-        this.emit('disconnected', { type: 'disconnected' });
-      }
-
-      this.scheduleReconnect();
-    };
-
-    this.ws.onerror = () => {
+    ws.onerror = () => {
       this.ws?.close();
     };
+  }
+
+  private handleClose(): void {
+    const wasConnected = this._connected;
+    this._connected = false;
+    this.stopHeartbeat();
+
+    // Emit disconnected lifecycle event (only if we were previously connected)
+    if (wasConnected) {
+      this.emit('disconnected', { type: 'disconnected' });
+    }
+
+    this.scheduleReconnect();
   }
 
   send(data: unknown): void {
@@ -123,9 +131,10 @@ export class WSClient {
   }
 
   private startHeartbeat(): void {
-    this.heartbeatTimer = setInterval(() => {
-      this.send({ type: 'ping' });
-    }, 30000);
+    this.heartbeatTimer = setInterval(this.probe, WSClient.HEARTBEAT_INTERVAL);
+    // Back from sleep or on a new network: check the socket now, not at the next beat
+    window.addEventListener('online', this.probe);
+    document.addEventListener('visibilitychange', this.probe);
   }
 
   private stopHeartbeat(): void {
@@ -133,5 +142,39 @@ export class WSClient {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+    this.clearPongTimer();
+    window.removeEventListener('online', this.probe);
+    document.removeEventListener('visibilitychange', this.probe);
+  }
+
+  /**
+   * Ping, and give up on the socket if nothing comes back in time. After
+   * sleep/wake or a network change a dead socket can stay OPEN for minutes,
+   * silently swallowing every frame sent on it.
+   */
+  private probe = (): void => {
+    if (this.pongTimer || this.ws?.readyState !== WebSocket.OPEN) return;
+    this.send({ type: 'ping' });
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = null;
+      console.warn('[WSClient] No pong, reconnecting');
+      this.dropDeadSocket();
+    }, WSClient.PONG_TIMEOUT);
+  };
+
+  private clearPongTimer(): void {
+    if (this.pongTimer) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
+  }
+
+  /** Stop listening to a dead socket (its close event may never come) and reconnect. */
+  private dropDeadSocket(): void {
+    const ws = this.ws;
+    if (!ws) return;
+    ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+    ws.close();
+    this.handleClose();
   }
 }
