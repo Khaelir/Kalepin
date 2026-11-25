@@ -1,5 +1,6 @@
 import type { OTOperation } from '@kalepin/shared';
 import { WSClient } from '../ws/ws-client';
+import { applyOpsToMarkdown, diffMarkdownToOps } from './ot-bridge';
 
 type OpCallback = (ops: OTOperation) => void;
 type ErrorCallback = (error: string) => void;
@@ -20,6 +21,7 @@ export class OTClient {
   private ws: WSClient;
   private docId: string;
   private cleanupFns: (() => void)[] = [];
+  /** The server's text at `revision`: every acked and remote op applied, nothing in flight. */
   private confirmedShadow: string = '';
 
   constructor(ws: WSClient, docId: string, revision: number, onRemoteOp: OpCallback, opts?: { onError?: ErrorCallback; initialShadow?: string }) {
@@ -61,9 +63,28 @@ export class OTClient {
     return this.confirmedShadow;
   }
 
-  /** Update the confirmed shadow (called externally when shadow is known). */
-  setConfirmedShadow(shadow: string): void {
-    this.confirmedShadow = shadow;
+  /** Whether a local op is still waiting for the server's ack. */
+  hasUnackedOps(): boolean {
+    return this.state !== ClientState.Synchronized;
+  }
+
+  /**
+   * Re-sync after a reconnect: doc:opened brought the server's text and
+   * revision. Local edits the server never confirmed (in flight, buffered,
+   * or sent into a dead socket) are rebased onto that text and sent again
+   * instead of being dropped. `localText` is the text the editor shows;
+   * returns the text it should show now.
+   */
+  resync(serverText: string, revision: number, localText: string): string {
+    const { text, ops } = rebaseUnconfirmed(this.confirmedShadow, localText, serverText, this.pending, this.buffer);
+    console.debug(`[OTClient] resync docId="${this.docId}", rev=${this.revision}->${revision}, resend=${!!ops}`);
+    this.state = ClientState.Synchronized;
+    this.pending = null;
+    this.buffer = null;
+    this.revision = revision;
+    this.confirmedShadow = serverText;
+    if (ops) this.sendOp(ops);
+    return text;
   }
 
   setRemoteOpCallback(cb: OpCallback): void {
@@ -104,6 +125,7 @@ export class OTClient {
   private handleAck(rev: number): void {
     console.debug(`[OTClient] handleAck docId="${this.docId}", newRev=${rev}, state=${ClientState[this.state]}`);
     this.revision = rev;
+    if (this.pending) this.confirmedShadow = applyOpsToMarkdown(this.confirmedShadow, this.pending);
     switch (this.state) {
       case ClientState.AwaitingConfirm:
         this.pending = null;
@@ -131,6 +153,7 @@ export class OTClient {
   private handleRemoteOp(ops: OTOperation, rev: number): void {
     console.debug(`[OTClient] handleRemoteOp docId="${this.docId}", rev=${rev}`);
     this.revision = rev;
+    this.confirmedShadow = applyOpsToMarkdown(this.confirmedShadow, ops);
 
     switch (this.state) {
       case ClientState.Synchronized:
@@ -152,6 +175,37 @@ export class OTClient {
         break;
     }
   }
+}
+
+/**
+ * Carry local edits the server never confirmed onto its current text.
+ * `base` is the server text the client last knew, `local` that text with the
+ * unconfirmed ops applied (`pending`, then `buffer`), `server` the server's
+ * text now. Returns the text to show and the op to send against `server`
+ * (null when nothing is left to send).
+ */
+export function rebaseUnconfirmed(
+  base: string,
+  local: string,
+  server: string,
+  pending: OTOperation | null,
+  buffer: OTOperation | null,
+): { text: string; ops: OTOperation | null } {
+  let ours = pending && buffer ? composeOps(pending, buffer) : pending;
+  // The connection may have dropped after the server applied the in-flight
+  // op but before its ack arrived. (If others edited too this can't be told
+  // apart, and the op is sent again.)
+  if (pending && applyOpsToMarkdown(base, pending) === server) {
+    base = server;
+    ours = buffer;
+  }
+  // Keep the exact ops when they add up to the local text, else diff
+  if (!ours || applyOpsToMarkdown(base, ours) !== local) ours = diffMarkdownToOps(base, local);
+  if (!ours) return { text: server, ops: null };
+  const theirs = diffMarkdownToOps(base, server);
+  if (theirs) ours = transformOps(ours, theirs)[0];
+  const text = applyOpsToMarkdown(server, ours);
+  return { text, ops: text === server ? null : ours };
 }
 
 // Minimal client-side OT transform (mirrors server logic)

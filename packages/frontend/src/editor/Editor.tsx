@@ -1144,24 +1144,18 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       (ops) => applyServerText(applyOpsToMarkdown(shadowRef.current, ops), ops),
       {
         initialShadow: initialContent,
-        onError: () => {
-          // Reset optimistic shadow to confirmed shadow
-          const confirmed = otClient.getConfirmedShadow();
-          if (confirmed) {
-            applyServerText(confirmed);
-          }
-        },
+        // Reset optimistic shadow to confirmed shadow
+        onError: () => applyServerText(otClient.getConfirmedShadow()),
       },
     );
     otClientRef.current = otClient;
     console.debug(`[Editor] OTClient created for docId="${docId}", revision=${initialRevision}`);
 
-    // Track acks to update confirmed shadow and save status
+    // Track acks for the save status. OTClient handled this ack first (and
+    // may have sent its buffer): the note is only acked once nothing is left.
     const offAck = wsClient.on('ack', (msg: any) => {
       if (msg.docId !== docId) return;
-      // Update confirmed shadow to current shadow (which reflects acked state)
-      otClient.setConfirmedShadow(shadowRef.current);
-      markAcked();
+      if (!otClient.hasUnackedOps()) markAcked();
     });
 
     return () => {
@@ -1185,40 +1179,23 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
     const offDocOpened = wsClient.on('doc:opened', (msg: any) => {
       if (msg.docId !== docId) return;
       // Only handle re-sync (not initial open)
-      if (!otClientRef.current) return;
+      const otClient = otClientRef.current;
+      if (!otClient) return;
 
       console.debug(`[Editor] Re-sync doc:opened for "${docId}", rev=${msg.revision}`);
 
-      // Destroy old OTClient
-      otClientRef.current.destroy();
-
-      // Create new OTClient with fresh revision
-      const otClient = new OTClient(
-        wsClient,
-        docId,
-        msg.revision,
-        (ops) => applyServerText(applyOpsToMarkdown(shadowRef.current, ops), ops),
-        {
-          initialShadow: msg.content,
-          onError: () => {
-            const confirmed = otClient.getConfirmedShadow();
-            if (confirmed) {
-              applyServerText(confirmed);
-            }
-          },
-        },
-      );
-      otClientRef.current = otClient;
-
-      // Replace editor content with server state
-      applyServerText(msg.content);
+      // Rebase the edits the server never confirmed onto its current text and
+      // send them again, rather than replacing them with the server's text
+      applyServerText(otClient.resync(msg.content, msg.revision, shadowRef.current));
 
       // Restore editable and reset save status (comment-only stays locked).
       // Read permission from the payload — the server re-sends it on every
       // doc:opened, so a re-sync sees the current value even if the prop is stale.
       const livePermission = msg.permission ?? permission;
       if (!previewActiveRef.current) editor.setEditable(livePermission !== 'comment');
+      // Not "Saved" while re-sent edits await their ack
       resetToSynced();
+      if (otClient.hasUnackedOps()) markDirty();
     });
 
     return () => {
