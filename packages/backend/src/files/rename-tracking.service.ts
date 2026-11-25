@@ -38,10 +38,14 @@ export class RenameTrackingService implements OnModuleInit {
     @Optional() private readonly changeTracking?: ChangeTrackingService,
   ) {
     this.correlator = new RenameCorrelator((p) => this.storage.read(p));
-    this.correlator.setRenameHandler((rename) => this.handleRename(rename));
+    this.correlator.setRenameHandler((rename) => {
+      this.fileWatcher.emitDetectedRename(rename.oldPath, rename.newPath);
+      return this.handleRename(rename);
+    });
     this.personalCorrelator = new RenameCorrelator((p) => this.storage.read(p));
-    this.personalCorrelator.setRenameHandler(({ oldPath }) => {
+    this.personalCorrelator.setRenameHandler(({ oldPath, newPath }) => {
       this.recentlyRenamed.add(oldPath);
+      this.fileWatcher.emitDetectedRename(oldPath, newPath);
     });
   }
 

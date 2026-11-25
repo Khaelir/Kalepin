@@ -12,6 +12,7 @@ class StubFileWatcher {
   readonly real = new FileWatcherService({} as any);
   onFileChange(cb: (event: FileChangeEvent) => void) { this.shared = cb; }
   onPersonalChange(cb: (event: FileChangeEvent) => void) { this.personal = cb; }
+  emitDetectedRename() {}
   isSelfRemoved(p: string) { return this.real.isSelfRemoved(p); }
   isSelfCaused(p: string) { return this.real.isSelfCaused(p); }
 }

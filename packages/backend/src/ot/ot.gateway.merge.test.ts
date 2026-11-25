@@ -35,9 +35,14 @@ function fakeSocket(email = 'alice@example.com', sub = 1): FakeSocket {
 class CapturingWatcher {
   shared: Array<(event: FileChangeEvent) => void> = [];
   personal: Array<(event: FileChangeEvent) => void> = [];
+  renames: Array<(from: string, to: string) => void> = [];
+  selfCaused = new Set<string>();
   onFileChange(cb: (event: FileChangeEvent) => void) { this.shared.push(cb); }
   onPersonalChange(cb: (event: FileChangeEvent) => void) { this.personal.push(cb); }
+  onDetectedRename(cb: (from: string, to: string) => void) { this.renames.push(cb); }
+  isSelfCaused(p: string) { return this.selfCaused.has(p); }
   emit(event: FileChangeEvent) { for (const cb of this.shared) cb(event); }
+  emitRename(from: string, to: string) { for (const cb of this.renames) cb(from, to); }
 }
 
 let tmpRoot: string;
@@ -140,6 +145,83 @@ describe('OTGateway — another program edits an open note', () => {
     assert.equal(ot.sessionManager.getContent('n.md'), 'abcd');
     assert.equal(ot.sessionManager.getRevision('n.md'), 1);
     assert.deepEqual(ws.sent, []);
+  });
+});
+
+describe('OTGateway — another program deletes or renames an open note', () => {
+  /** Let the settle timer's async work (an exists() call, a merge) finish. */
+  const settle = async () => {
+    for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+    await mergesDone();
+  };
+
+  it('a deleted note is not re-created by the session, and its editors reload', async () => {
+    await storage.write('n.md', 'abc');
+    const ws = await openAndType('n.md', 'd', 3); // unsaved, flush armed
+
+    await fs.unlink(path.join(vault, 'n.md'));
+    watcher.emit({ event: 'unlink', path: 'n.md' });
+    mock.timers.tick(3_000); // the flush that used to re-create the file
+    await ot.sessionManager.flushNow('n.md');
+    assert.equal(await storage.exists('n.md'), false, 'no flush while the file is missing');
+
+    mock.timers.tick(1_000); // settle window
+    await settle();
+
+    assert.equal(ot.sessionManager.getSession('n.md'), undefined);
+    assert.deepEqual(ws.sent.filter((m) => m.type === 'doc:reload'), [{ type: 'doc:reload', path: 'n.md' }]);
+    assert.equal(await storage.exists('n.md'), false);
+  });
+
+  it('a note saved by delete + re-create keeps its session, merges the new content and saves again', async () => {
+    await storage.write('n.md', 'one\n');
+    const ws = await openAndType('n.md', '0', 0); // "0one\n", unsaved
+
+    await fs.unlink(path.join(vault, 'n.md'));
+    watcher.emit({ event: 'unlink', path: 'n.md' });
+    await fs.writeFile(path.join(vault, 'n.md'), 'one\ntwo\n');
+    watcher.emit({ event: 'add', path: 'n.md' });
+    await mergesDone();
+    mock.timers.tick(1_000);
+    await settle();
+
+    assert.equal(ot.sessionManager.getContent('n.md'), '0one\ntwo\n');
+    assert.ok(!ws.sent.some((m) => m.type === 'doc:reload'));
+    mock.timers.tick(3_000);
+    await ot.sessionManager.flushNow('n.md');
+    assert.equal(await storage.read('n.md'), '0one\ntwo\n');
+  });
+
+  it('a renamed note takes its session along and does not come back at the old path', async () => {
+    await storage.write('old.md', 'abc');
+    const ws = await openAndType('old.md', 'd', 3); // unsaved
+
+    await fs.rename(path.join(vault, 'old.md'), path.join(vault, 'new.md'));
+    watcher.emit({ event: 'unlink', path: 'old.md' });
+    watcher.emitRename('old.md', 'new.md');
+    await settle();
+    mock.timers.tick(1_000);
+    await settle();
+
+    assert.equal(ot.sessionManager.getSession('old.md'), undefined);
+    assert.equal(ot.sessionManager.getContent('new.md'), 'abcd');
+    assert.ok(ws.sent.some((m) => m.type === 'doc:moved' && m.from === 'old.md' && m.to === 'new.md'));
+    mock.timers.tick(3_000);
+    await ot.sessionManager.flushNow('new.md');
+    assert.equal(await storage.read('new.md'), 'abcd');
+    assert.equal(await storage.exists('old.md'), false);
+  });
+
+  it('leaves Kalepin\'s own moves to the move hooks', async () => {
+    await storage.write('n.md', 'abc');
+    await openAndType('n.md', 'd', 3);
+    watcher.selfCaused.add('n.md');
+
+    watcher.emit({ event: 'unlink', path: 'n.md' });
+    watcher.emitRename('n.md', 'm.md');
+
+    assert.ok(ot.sessionManager.getSession('n.md'));
+    assert.equal(ot.sessionManager.getSession('n.md')!.flushesHeld, undefined);
   });
 });
 

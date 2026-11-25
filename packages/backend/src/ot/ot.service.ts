@@ -214,6 +214,36 @@ export class OTService {
   }
 
   /**
+   * The file of an open note vanished from disk (flushes held since) and the
+   * settle window passed without a rename taking the session elsewhere. If
+   * the file is back (an editor saving by delete + re-create), merge it and
+   * resume flushing. If it is still gone, another program deleted it: drop
+   * the session without writing it back, which would re-create the file.
+   * Resolves to the dropped session's clients, else null.
+   */
+  async settleExternalUnlink(docId: string): Promise<WebSocket[] | null> {
+    try {
+      if (!this.sessionManager.getSession(docId)) return null;
+      const back = await this.storage.exists(docId);
+      if (!this.sessionManager.getSession(docId)) return null;
+      if (back) {
+        this.sessionManager.releaseFlushes(docId);
+        await this.mergeExternalChange(docId);
+        return null;
+      }
+      const dropped = this.sessionManager.discardSession(docId);
+      if (!dropped) return null;
+      if (dropped.unflushed !== null) {
+        this.logger.warn(`"${docId}" was deleted outside Kalepin with unsaved edits in its session; they were not written back`);
+      }
+      return dropped.clients;
+    } catch (err) {
+      this.logger.error(`Failed to settle the removal of "${docId}"`, err);
+      return null;
+    }
+  }
+
+  /**
    * A server-side write (MCP, REST) to a note with a live session: `edit`
    * gets the live content and returns the new one, and may throw (a stale
    * base hash, text not found). The change is applied as an op at the

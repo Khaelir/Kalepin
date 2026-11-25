@@ -34,6 +34,8 @@ interface DocumentSession {
   flushing?: Promise<void>;
   /** Writes started so far, to tell a disk read that raced one of them. */
   writes: number;
+  /** The file vanished from disk; no flush until we know where it went. */
+  flushesHeld?: boolean;
   /** When the oldest edit not yet written was made (ms), or since the last failed write. */
   dirtySince?: number;
 }
@@ -135,6 +137,8 @@ export class OTSessionManager {
 
     if (session.flushTimer) clearTimeout(session.flushTimer);
     session.flushTimer = undefined;
+    // Flushes held because the old path vanished can go to the new one.
+    session.flushesHeld = false;
     if (session.dirty) {
       this.scheduleDebouncedFlush(newId);
     } else {
@@ -142,6 +146,27 @@ export class OTSessionManager {
     }
     this.logger.debug(`Renamed session "${oldId}" -> "${newId}", dirty=${session.dirty}`);
     return { displaced };
+  }
+
+  /**
+   * Stop writing the session to disk: its file vanished, and until we know
+   * whether it was deleted, renamed or is being re-created, a flush would
+   * re-create it. Edits keep landing in memory.
+   */
+  holdFlushes(docId: string): void {
+    const session = this.sessions.get(docId);
+    if (!session) return;
+    session.flushesHeld = true;
+    if (session.flushTimer) clearTimeout(session.flushTimer);
+    session.flushTimer = undefined;
+  }
+
+  /** Undo holdFlushes: the file is back. */
+  releaseFlushes(docId: string): void {
+    const session = this.sessions.get(docId);
+    if (!session?.flushesHeld) return;
+    session.flushesHeld = false;
+    if (session.dirty) this.scheduleDebouncedFlush(docId);
   }
 
   /**
@@ -391,8 +416,8 @@ export class OTSessionManager {
       await session.flushing;
       session = this.sessions.get(docId);
     }
-    if (!session || !session.dirty) {
-      this.logger.debug(`Flush skip for "${docId}" — session=${!!session}, dirty=${session?.dirty}`);
+    if (!session || !session.dirty || session.flushesHeld) {
+      this.logger.debug(`Flush skip for "${docId}" — session=${!!session}, dirty=${session?.dirty}, held=${!!session?.flushesHeld}`);
       return;
     }
 

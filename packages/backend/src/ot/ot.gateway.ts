@@ -49,6 +49,13 @@ interface AuthenticatedWebSocket extends WebSocket {
 /** How long ops sent under a renamed doc's old id are still routed to the new one. */
 const MOVED_ALIAS_TTL_MS = 30_000;
 
+/**
+ * How long an open note's file may be missing before it counts as deleted:
+ * longer than the rename correlator's pairing (300 ms + content match) and
+ * an editor's delete + re-create save.
+ */
+const EXTERNAL_UNLINK_SETTLE_MS = 1_000;
+
 @WebSocketGateway({ path: '/ws' })
 export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(OTGateway.name);
@@ -104,6 +111,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
           path: event.path,
         });
       }
+      if (event.event === 'unlink') this.handleDiskUnlink(event.path);
       // Broadcast file tree updates for add/delete events.
       // Shared-vault paths are visible to every authenticated user, so plain
       // broadcast is safe here (the personal subtree never produces shared events).
@@ -129,6 +137,7 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
           path: event.path,
         });
       }
+      if (event.event === 'unlink') this.handleDiskUnlink(event.path);
       if (['add', 'unlink', 'addDir', 'unlinkDir'].includes(event.event)) {
         this.fanoutToEmail(email, {
           type: 'file:tree-update',
@@ -180,6 +189,43 @@ export class OTGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.filesService.on('file:written', (payload: { path: string }) => {
       void this.otService.mergeExternalChange(payload.path);
     });
+
+    // Another program renamed a file under an open note (the watcher paired
+    // its unlink and add): the session follows it, as for a Kalepin rename.
+    this.fileWatcher.onDetectedRename((from, to) => {
+      // FilesService.move: its afterMove hook follows the rename.
+      if (this.fileWatcher.isSelfCaused(from)) return;
+      if (this.otService.sessionManager.sessionIdsAtOrUnder(from).length === 0) return;
+      this.followRename(from, to).catch((err) => {
+        this.logger.error(`Failed to follow the rename of "${from}" to "${to}"`, err);
+      });
+    });
+  }
+
+  /**
+   * The file of an open note vanished from disk. Kalepin's own moves, trash
+   * and deletes are handled by the move/trash hooks. Anything else is another
+   * program deleting or renaming it, or an editor saving by delete +
+   * re-create: hold the session's flushes, which would re-create the file,
+   * until the rename correlator and the re-create have had time to show up.
+   */
+  private handleDiskUnlink(path: string): void {
+    if (!this.otService.sessionManager.getSession(path) || this.fileWatcher.isSelfCaused(path)) return;
+    this.otService.sessionManager.holdFlushes(path);
+    setTimeout(() => void this.settleDiskUnlink(path), EXTERNAL_UNLINK_SETTLE_MS);
+  }
+
+  /** Still gone and not renamed: deleted. Editors reload the path, now empty. */
+  private async settleDiskUnlink(path: string): Promise<void> {
+    const clients = await this.otService.settleExternalUnlink(path);
+    if (!clients) return;
+    this.movedDocIds.delete(path);
+    const frame = JSON.stringify({ type: 'doc:reload', path });
+    for (const ws of clients) {
+      const client = ws as AuthenticatedWebSocket;
+      if (client.docId === path) client.docId = undefined;
+      if (client.readyState === WebSocket.OPEN) client.send(frame);
+    }
   }
 
   /**

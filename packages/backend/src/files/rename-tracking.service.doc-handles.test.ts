@@ -13,6 +13,8 @@ class StubFileWatcher {
     this.cb = cb;
   }
   onPersonalChange() {}
+  renames: Array<[string, string]> = [];
+  emitDetectedRename(oldPath: string, newPath: string) { this.renames.push([oldPath, newPath]); }
   isSelfRemoved() { return false; }
   isSelfCaused() { return false; }
 }
@@ -126,5 +128,7 @@ describe('RenameTrackingService — doc handles', () => {
     const result = await docHandles.resolve(id);
     assert.equal(result.tombstoned, false);
     assert.equal(result.path, 'Notes/Bar.md');
+    // Live editing sessions follow detected renames through the watcher.
+    assert.deepEqual(watcher.renames, [['Notes/Foo.md', 'Notes/Bar.md']]);
   });
 });

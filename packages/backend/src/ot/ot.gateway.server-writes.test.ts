@@ -34,7 +34,7 @@ function fakeSocket(email = 'alice@example.com', sub = 1): FakeSocket {
   };
 }
 
-const noopWatcher = { onFileChange() {}, onPersonalChange() {} } as any;
+const noopWatcher = { onFileChange() {}, onPersonalChange() {}, onDetectedRename() {} } as any;
 
 let tmpRoot: string;
 let storage: LocalFSAdapter;
