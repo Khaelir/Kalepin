@@ -4,9 +4,12 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
+import { DataSource } from 'typeorm';
 import { MemoryKEKSource } from '../crypto/kek-source';
 import { encrypt, decrypt, rewrapEnvelope } from '../crypto/envelope';
-import { rotateRoot, ZoneRoot } from './rotate-kek';
+import { EncryptionZone } from '../entities/encryption-zone.entity';
+import { EncryptionZonesService } from '../encryption/encryption-zones.service';
+import { rotateRoot, updateZoneFingerprints, ZoneRoot } from './rotate-kek';
 
 const USER = 'alice@x.com';
 
@@ -80,6 +83,30 @@ describe('rotate-kek — end-to-end encrypted files', () => {
     for (const name of ['a.md', 'b.md']) {
       const out = await decrypt(await readAt(personal, `${USER}/${name}`), `_users/${USER}/${name}`, newKek);
       assert.equal(out.toString(), `body of ${USER}/${name}`);
+    }
+  });
+});
+
+describe('rotate-kek — zone fingerprints', () => {
+  it('binds the enabled zones to the new KEK in the server database', async () => {
+    // The schema the server creates (TypeORM synchronize), personal enabled.
+    const dbPath = path.join(tmpRoot, 'kalepin.sqlite');
+    const ds = new DataSource({ type: 'better-sqlite3', database: dbPath, entities: [EncryptionZone], synchronize: true });
+    await ds.initialize();
+    await new EncryptionZonesService(ds.getRepository(EncryptionZone)).initForTests();
+    await ds.destroy();
+
+    updateZoneFingerprints(dbPath, newKek.fingerprint);
+
+    await ds.initialize();
+    try {
+      const rows = await ds.getRepository(EncryptionZone).find({ order: { zone: 'ASC' } });
+      assert.deepEqual(
+        rows.map((r) => [r.zone, r.kekFingerprint?.toString('hex') ?? null]),
+        [['personal', newKek.fingerprint.toString('hex')], ['shared', null]],
+      );
+    } finally {
+      await ds.destroy();
     }
   });
 });

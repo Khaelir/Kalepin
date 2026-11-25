@@ -17,7 +17,7 @@ import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import Database from 'better-sqlite3';
+import * as Database from 'better-sqlite3';
 import {
   FileKEKSource,
   KEKSource,
@@ -189,11 +189,12 @@ export async function rotateRoot(
   return { rewrapped, skipped, passthrough, endToEnd };
 }
 
-function updateZoneFingerprints(dbPath: string, newFp: Buffer): void {
+export function updateZoneFingerprints(dbPath: string, newFp: Buffer): void {
   const db = new Database(dbPath);
   try {
+    // Column names follow the TypeORM entity (EncryptionZone): camelCase.
     const stmt = db.prepare(
-      "UPDATE encryption_zones SET kek_fingerprint = ?, updated_at = ? WHERE enabled = 1",
+      'UPDATE encryption_zones SET "kekFingerprint" = ?, "updatedAt" = ? WHERE enabled = 1',
     );
     stmt.run(newFp, Date.now());
   } finally {
