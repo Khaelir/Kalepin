@@ -46,8 +46,8 @@ export class DocMentionService {
       const mentionedUserId = await this.notificationService.resolveUserId(mention.email);
       if (!mentionedUserId) continue;
 
-      // Auto-star regardless of notification approval
-      await this.starsService.autoStarForUser(mentionedUserId, docPath).catch((err) => {
+      // Auto-star regardless of notification approval, if they can see the note
+      await this.starsService.autoStarForUser(mentionedUserId, docPath, mention.email).catch((err) => {
         this.logger.error(`Failed to auto-star ${docPath} for user ${mentionedUserId}`, err);
       });
 

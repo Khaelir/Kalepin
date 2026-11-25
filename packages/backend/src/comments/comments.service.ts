@@ -287,8 +287,8 @@ export class CommentsService {
     const authorUserId = await this.notificationService.resolveUserId(authorEmail);
     if (!authorUserId) return;
 
-    // Auto-star
-    await this.starsService.autoStarForUser(mentionedUserId, filePath).catch((err) => {
+    // Auto-star (skipped for a note the mentioned user cannot see)
+    await this.starsService.autoStarForUser(mentionedUserId, filePath, mentionedEmail).catch((err) => {
       this.logger.error(`Failed to auto-star ${filePath} for user ${mentionedUserId}`, err);
     });
 
@@ -394,8 +394,8 @@ export class CommentsService {
     const authorUserId = await this.notificationService.resolveUserId(authorEmail);
     if (!authorUserId) return;
 
-    // Auto-star for mentioned users
-    await this.starsService.autoStarForUser(mentionedUserId, filePath).catch((err) => {
+    // Auto-star for mentioned users who can see the note
+    await this.starsService.autoStarForUser(mentionedUserId, filePath, mentionedEmail).catch((err) => {
       this.logger.error(`Failed to auto-star ${filePath} for user ${mentionedUserId}`, err);
     });
 

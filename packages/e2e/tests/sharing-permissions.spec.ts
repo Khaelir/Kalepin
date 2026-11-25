@@ -9,9 +9,11 @@
 // Each test plants its own users + notes via the REST API (no UI login flow).
 
 import { test, expect, type Page } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
 import jwt from 'jsonwebtoken';
 import WebSocket from 'ws';
-import { FRONTEND_PORT, BACKEND_PORT } from '../playwright.config';
+import { FRONTEND_PORT, BACKEND_PORT, PERSONAL_PATH } from '../playwright.config';
 
 const BASE_URL = `http://localhost:${FRONTEND_PORT}`;
 const API_URL = `http://localhost:${BACKEND_PORT}`;
@@ -608,10 +610,9 @@ test.describe('Sharing — grant path-sync on rename and delete', () => {
   });
 
   test('pre-existing dangling grant is filtered from _shared_with_me and revoked on next read', async () => {
-    // Backend allows minting against any path under the grantor's personal
-    // root, regardless of disk presence — that is exactly how legacy dangling
-    // rows were created before the rename/delete hooks shipped. We use that
-    // here to seed a dangling row and then verify the safety net cleans it up.
+    // Legacy dangling rows were left by deletes from before the rename/delete
+    // hooks shipped. Seed one the same way: grant a note, then remove its file
+    // behind the backend's back, and verify the safety net cleans it up.
     const aliceEmail = `psync-ghost-alice-${Date.now()}@example.com`;
     const bobEmail = `psync-ghost-bob-${Date.now()}@example.com`;
     const aliceToken = makeToken(aliceEmail);
@@ -619,12 +620,15 @@ test.describe('Sharing — grant path-sync on rename and delete', () => {
     await ensureFolderExists(aliceToken);
     await ensureFolderExists(bobToken);
 
-    const ghostPath = `_users/${aliceEmail}/ghost-${Date.now()}.md`;
+    const ghostName = `ghost-${Date.now()}.md`;
+    const ghostPath = `_users/${aliceEmail}/${ghostName}`;
+    await createNoteAt(aliceToken, ghostPath, '# Ghost\n');
     const { id: ghostId } = await mintGrant(aliceToken, {
       grantee_email: bobEmail,
       path: ghostPath,
       permission: 'read',
     });
+    fs.rmSync(path.join(PERSONAL_PATH, aliceEmail, ghostName));
 
     // First read — Bob's _shared_with_me must not include the ghost path.
     const groups = await listSharedWithMe(bobToken);

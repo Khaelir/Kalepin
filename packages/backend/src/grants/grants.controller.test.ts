@@ -155,6 +155,45 @@ describe('GrantsController.revoke', () => {
   });
 });
 
+describe('GrantsController — personal-folder owner', () => {
+  beforeEach(() => setup());
+  afterEach(teardown);
+
+  const PLAN = `_users/${ALICE}/Plan.md`;
+
+  it('revokes and updates a grant someone else minted before the note moved into her folder', async () => {
+    // Bob minted it while Plan.md was a shared-vault note.
+    const g = await grants.mint({ grantorEmail: BOB, granteeEmail: 'carol@example.com', path: PLAN, permission: 'read' });
+    await controller.patch(String(g.id), { permission: 'comment' }, makeReq(ALICE));
+    assert.equal((await grants.findById(g.id))!.permission, 'comment');
+    await controller.revoke(String(g.id), makeReq(ALICE));
+    assert.equal(await grants.findActive(PLAN, 'carol@example.com'), null);
+  });
+
+  it('gives no say over grants on someone else\'s folder', async () => {
+    const g = await grants.mint({ grantorEmail: BOB, granteeEmail: 'carol@example.com', path: `_users/${BOB}/x.md`, permission: 'read' });
+    await assert.rejects(() => controller.revoke(String(g.id), makeReq(ALICE)), ForbiddenException);
+    await assert.rejects(() => controller.patch(String(g.id), { permission: 'write' }, makeReq(ALICE)), ForbiddenException);
+  });
+
+  it('cannot grant a path that does not exist', async () => {
+    const existing = new Set([PLAN]);
+    controller = new GrantsController(grants, visibility, passthroughPredicates as any, undefined, undefined, {
+      exists: async (p: string) => existing.has(p),
+    } as any);
+    await assert.rejects(
+      () => controller.mint({ grantee_email: BOB, path: `_users/${ALICE}/Later.md`, permission: 'write' }, makeReq(ALICE)),
+      NotFoundException,
+    );
+    await assert.rejects(
+      () => controller.mint({ grantee_email: BOB, path: 'Not-yet.md', permission: 'write' }, makeReq(ALICE)),
+      NotFoundException,
+    );
+    assert.deepEqual(await grants.listForGrantee(BOB), []);
+    assert.ok((await controller.mint({ grantee_email: BOB, path: PLAN, permission: 'read' }, makeReq(ALICE))).id > 0);
+  });
+});
+
 describe('GrantsController.list', () => {
   beforeEach(() => setup());
   afterEach(teardown);

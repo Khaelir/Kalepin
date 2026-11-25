@@ -77,6 +77,7 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `JWT_SECRET` | — | Secret for signing auth tokens (change in production) |
 | `JWT_EXPIRY` | `7d` | Session duration |
 | `APP_URL` | `http://localhost:3000` | Public URL (used in magic link emails and OAuth discovery metadata). Behind a TLS-terminating reverse proxy (e.g. Traefik) this MUST be the public `https://…` URL the proxy fronts — otherwise OAuth connectors (claude.ai) will fail. The backend logs a WARN at boot if this disagrees with `X-Forwarded-Proto`/`X-Forwarded-Host`. |
+| `TRUST_PROXY` | `loopback, linklocal, uniquelocal` | Which proxies' `X-Forwarded-For` / `X-Forwarded-Proto` headers to believe (Express `trust proxy`). The client IP derived from them keys the per-IP rate limits (PIN attempts on public links, magic-link requests, OAuth client registration), so a client the setting trusts can choose its own IP. The default trusts loopback and private addresses: a reverse proxy on the Docker network or the host works, a client on the internet hitting port 3000 directly cannot spoof. Accepts `true`/`false`, a hop count (`1`), or a comma-separated list of addresses, CIDR subnets and the names `loopback`, `linklocal`, `uniquelocal`. If users reach port 3000 directly from a private network (LAN, VPN), set it to your proxy's address instead, or `false` with no proxy. |
 | `OAUTH_CORS_ALLOW_LIST` | — | Optional comma-separated extra origins allowed to call `/mcp`, `/oauth/*`, and `/.well-known/oauth-*`. `https://claude.ai` is always allowed. |
 | `OAUTH_PREREGISTERED_CLIENT_IDS` | — | Optional comma-separated `client_id`s to insert into `oauth_clients` at boot. Use only when claude.ai already has a connector registered with a hand-picked `client_id` (e.g. installed before this Kalepin instance had OAuth, or set up by an Owner who can't delete/re-add). Pre-registered rows are public clients (PKCE only) locked to claude.ai's MCP callback. |
 | `PORT` | `3000` | Server port |
@@ -352,7 +353,7 @@ The tools a client sees depend on the scope of its key or grant: **Read-only** (
 | `patch_note` | rw | Replace exactly one occurrence of `old_text`; fails if it is missing or ambiguous |
 | `append_to_note` | rw | Append content to the end of a note without rewriting it; `under_heading` appends to the end of a section |
 | `edit_note` | rw | Replace the whole content of a note |
-| `move_note` | rw | Move or rename a note; its id, comments and share links follow it and links to it are rewritten |
+| `move_note` | rw | Move or rename a note; its id, comments and share links follow it and links to it are rewritten. A move between the shared vault and a personal folder revokes its share links and grants |
 | `delete_note` | rw | Move a note to the trash and return its `trash_id` (Encrypted Folder notes are deleted permanently) |
 | `restore_version` | rw | Bring a note back to an earlier version; the current content is kept as a version first |
 | `restore_from_trash` | rw | Restore a deleted note or folder by `trash_id`, with its comments, shares and id |

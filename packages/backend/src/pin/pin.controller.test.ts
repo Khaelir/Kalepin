@@ -4,6 +4,7 @@ import { DataSource, Repository } from 'typeorm';
 import { NoteMeta } from '../entities/note-meta.entity';
 import { PinService } from './pin.service';
 import { PinController } from './pin.controller';
+import { GrantAwareVisibility } from '../auth/grant-aware-visibility.service';
 import type { EncryptionPredicates } from '../crypto/encryption-predicates';
 
 const ALICE = 'alice@example.com';
@@ -15,6 +16,7 @@ let ds: DataSource;
 let repo: Repository<NoteMeta>;
 let svc: PinService;
 let ctrl: PinController;
+let grantedTo: Set<string>;
 
 const stagePredicates = (e2e: (path: string) => boolean): EncryptionPredicates => ({
   isEncryptedAtRest: () => false,
@@ -39,9 +41,16 @@ beforeEach(async () => {
   await ds.initialize();
   repo = ds.getRepository(NoteMeta);
   svc = new PinService(repo);
+  grantedTo = new Set();
+  // Owner-or-shared visibility, plus a read grant on ALICE_NOTE for `grantedTo`.
+  const grants = {
+    findActive: async (p: string, email: string) =>
+      p === ALICE_NOTE && grantedTo.has(email) ? { permission: 'read' } : null,
+  } as any;
   ctrl = new PinController(
     svc,
     stagePredicates((path: string) => path.includes('/_secure/')),
+    new GrantAwareVisibility(grants),
   );
 });
 
@@ -130,5 +139,26 @@ describe('PinController — owner / grantee semantics (task 7.6)', () => {
       ctrl.setPin('../etc/passwd', { pin: 'abcd1234' }, userReq(ALICE)),
       { name: 'BadRequestException' },
     );
+  });
+});
+
+describe('PinController — verify does not reveal other people\'s notes', () => {
+  it('answers 404 alike for a locked and an unlocked note the caller cannot see', async () => {
+    const OTHER_NOTE = '_users/alice@example.com/other.md';
+    await ctrl.setPin(ALICE_NOTE, { pin: 'abcd1234' }, userReq(ALICE));
+    // Before: "wrong-pin" for the locked note, "No PIN set" for the other.
+    for (const p of [ALICE_NOTE, OTHER_NOTE]) {
+      await assert.rejects(
+        ctrl.verifyPin(p, { pin: 'guess1234' }, userReq(BOB), fakeRes()),
+        { name: 'NotFoundException' },
+      );
+    }
+  });
+
+  it('still lets a grantee unlock', async () => {
+    await ctrl.setPin(ALICE_NOTE, { pin: 'abcd1234' }, userReq(ALICE));
+    grantedTo.add(BOB);
+    const result = await ctrl.verifyPin(ALICE_NOTE, { pin: 'abcd1234' }, userReq(BOB), fakeRes());
+    assert.equal((result as { ok?: boolean }).ok, true);
   });
 });

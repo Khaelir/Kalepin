@@ -111,6 +111,9 @@ export class FilesController {
       throw new BadRequestException('path or handle query parameter is required');
     }
 
+    // Visibility before the PIN on every route: a 423 (which also carries the
+    // path) would confirm that someone else's private note exists and is locked.
+    await this.filesService.assertReadable(filePath, req.user.email);
     await this.pinService.assertUnlockedForRequest(req, filePath, req.user.email);
     const content = await this.filesService.readFile(filePath, req.user.email);
     const action = this.predicates.isE2EEncrypted(filePath) ? 'fetched' : 'view';
@@ -147,6 +150,7 @@ export class FilesController {
     // log and the handle all see the path FilesService.createFile writes.
     // Checking the raw path would let `x` overwrite a PIN-locked `x.md`.
     const writtenPath = body.path.endsWith('.md') ? body.path : `${body.path}.md`;
+    await this.filesService.assertWritable(writtenPath, req.user.email);
     await this.pinService.assertUnlockedForRequest(req, writtenPath, req.user.email);
     await this.filesService.createFile(writtenPath, body.content || '', req.user.sub, undefined, req.user.email);
     void this.accessLog.record(writtenPath, req.user.email, 'edit', extractClientIp(req));
@@ -160,6 +164,7 @@ export class FilesController {
     @Query('path') filePath: string,
     @Req() req: Request & { user: JwtPayload },
   ) {
+    await this.filesService.assertWritable(filePath, req.user.email);
     await this.pinService.assertUnlockedForRequest(req, filePath, req.user.email);
     const { trashItemId } = await this.filesService.deleteFile(filePath, req.user.sub, req.user.email);
     // trashItemId is null for permanent deletes (`_secure/` paths).
@@ -185,6 +190,7 @@ export class FilesController {
   async move(@Body() body: { src: string; dest: string }, @Req() req: Request & { user: JwtPayload }) {
     // PIN is bound to the source path's identity. The destination inherits no
     // PIN until the owner sets one.
+    await this.filesService.assertWritable(body.src, req.user.email);
     await this.pinService.assertUnlockedForRequest(req, body.src, req.user.email);
     await this.filesService.move(body.src, body.dest, req.user.email);
     return { src: body.src, dest: body.dest };
@@ -222,13 +228,17 @@ export class FilesController {
 
   @Get('headings')
   @RequiredScope('notes:read')
-  async getHeadings(@Query('path') filePath: string, @Req() req: { user: JwtPayload }) {
+  async getHeadings(@Query('path') filePath: string, @Req() req: Request & { user: JwtPayload }) {
     if (!filePath) throw new BadRequestException('path query parameter is required');
+    // Headings are note content: same gates as a read. Like the other routes,
+    // the 404 does not echo the requested path back.
+    await this.filesService.assertReadable(filePath, req.user.email);
+    await this.pinService.assertUnlockedForRequest(req, filePath, req.user.email);
     let content: string;
     try {
       content = await this.filesService.readFile(filePath, req.user.email);
     } catch {
-      throw new NotFoundException(`File not found: ${filePath}`);
+      throw new NotFoundException('File not found');
     }
     const headings: { level: number; text: string }[] = [];
     for (const line of content.split('\n')) {
@@ -245,9 +255,9 @@ export class FilesController {
   async getHistory(@Query('path') path: string, @Req() req: Request & { user: JwtPayload }) {
     if (!path) throw new BadRequestException('path query parameter is required');
     // History rows hold past note content, so they get the same gates as a read.
-    await this.pinService.assertUnlockedForRequest(req, path, req.user.email);
     await this.filesService.assertReadable(path, req.user.email);
-    return this.versionHistory.getHistory(path);
+    await this.pinService.assertUnlockedForRequest(req, path, req.user.email);
+    return this.versionHistory.getHistory(path, req.user.email);
   }
 
   @Get('version')
@@ -261,9 +271,9 @@ export class FilesController {
     if (!changeIdStr) throw new BadRequestException('changeId query parameter is required');
     const changeId = parseInt(changeIdStr, 10);
     if (isNaN(changeId)) throw new BadRequestException('changeId must be a number');
-    await this.pinService.assertUnlockedForRequest(req, path, req.user.email);
     await this.filesService.assertReadable(path, req.user.email);
-    return this.versionHistory.reconstructVersion(path, changeId);
+    await this.pinService.assertUnlockedForRequest(req, path, req.user.email);
+    return this.versionHistory.reconstructVersion(path, changeId, req.user.email);
   }
 
   @Post('restore')
@@ -274,10 +284,10 @@ export class FilesController {
   ) {
     if (!body.path) throw new BadRequestException('path is required');
     if (!body.changeId) throw new BadRequestException('changeId is required');
-    await this.pinService.assertUnlockedForRequest(req, body.path, req.user.email);
     await this.filesService.assertWritable(body.path, req.user.email);
+    await this.pinService.assertUnlockedForRequest(req, body.path, req.user.email);
 
-    const { content: historicalContent, partial } = await this.versionHistory.reconstructVersion(body.path, body.changeId);
+    const { content: historicalContent, partial } = await this.versionHistory.reconstructVersion(body.path, body.changeId, req.user.email);
     if (partial) {
       throw new UnprocessableEntityException('Cannot restore: version reconstruction failed due to corrupted diff chain');
     }

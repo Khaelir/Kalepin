@@ -18,6 +18,7 @@ const ALICE = 'alice@example.com';
 const BOB = 'bob@example.com';
 const ALICE_NOTE = '_users/alice@example.com/Journal.md';
 const LOCKED_NOTE = 'Notes/locked.md';
+const ALICE_LOCKED = '_users/alice@example.com/Locked.md';
 
 let tmpRoot: string;
 let controller: FilesController;
@@ -25,9 +26,18 @@ let historyCalls: string[];
 
 const stubPin = {
   assertUnlockedForRequest: async (_req: unknown, p: string) => {
-    if (p === LOCKED_NOTE) throw new PinLockedException(p);
+    if (p === LOCKED_NOTE || p === ALICE_LOCKED) throw new PinLockedException(p);
   },
 } as any;
+
+const stubDocHandles = {
+  findOrCreateForPath: async () => 'HANDLE0000000000',
+  resolve: async () => ({ path: ALICE_LOCKED, tombstoned: false }),
+} as any;
+
+function fakeRes(): any {
+  return { setHeader: () => {}, status: () => ({ json: () => {}, end: () => {} }) };
+}
 
 const stubVersionHistory = {
   getHistory: async (p: string) => {
@@ -74,7 +84,7 @@ beforeEach(async () => {
     {} as any,
     { record: () => {} } as any,
     {} as any,
-    {} as any,
+    stubDocHandles,
   );
 });
 
@@ -108,6 +118,33 @@ describe('FilesController history endpoints — access control', () => {
   it('gates create on the .md path it writes, not the raw one', async () => {
     await assert.rejects(controller.createFile({ path: 'Notes/locked', content: 'x' }, req(ALICE)), PinLockedException);
     await assert.rejects(controller.createFile({ path: LOCKED_NOTE, content: 'x' }, req(ALICE)), PinLockedException);
+  });
+
+  it('answers 404, not 423, for another user\'s PIN-locked note', async () => {
+    // A 423 confirmed the private note exists and is locked, and its body
+    // carried the full path, even when Bob only had a handle id.
+    const bob = req(BOB);
+    await assert.rejects(controller.readFile(ALICE_LOCKED, undefined, bob, fakeRes()), NotFoundException);
+    await assert.rejects(controller.readFile(undefined, 'HANDLE0000000000', bob, fakeRes()), NotFoundException);
+    await assert.rejects(controller.getHistory(ALICE_LOCKED, bob), NotFoundException);
+    await assert.rejects(controller.getVersion(ALICE_LOCKED, '1', bob), NotFoundException);
+    await assert.rejects(controller.restoreVersion({ path: ALICE_LOCKED, changeId: 1 }, bob), NotFoundException);
+    await assert.rejects(controller.createFile({ path: ALICE_LOCKED, content: 'x' }, bob), NotFoundException);
+    await assert.rejects(controller.deleteFile(ALICE_LOCKED, bob), NotFoundException);
+    await assert.rejects(controller.move({ src: ALICE_LOCKED, dest: 'Notes/x.md' }, bob), NotFoundException);
+    // The owner still meets the PIN.
+    await assert.rejects(controller.readFile(ALICE_LOCKED, undefined, req(ALICE), fakeRes()), PinLockedException);
+    assert.deepEqual(historyCalls, []);
+  });
+
+  it('headings: PIN gate for the owner, 404 without the path for everyone else', async () => {
+    await assert.rejects(controller.getHeadings(ALICE_LOCKED, req(ALICE)), PinLockedException);
+    for (const p of [ALICE_LOCKED, ALICE_NOTE, 'Notes/missing.md']) {
+      await assert.rejects(
+        controller.getHeadings(p, req(BOB)),
+        (e: unknown) => e instanceof NotFoundException && !JSON.stringify(e.getResponse()).includes(p),
+      );
+    }
   });
 
   it('serves the owner', async () => {

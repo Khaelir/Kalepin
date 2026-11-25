@@ -21,7 +21,7 @@ import type { Request, Response } from 'express';
 import { CombinedAuthGuard } from '../auth';
 import { RequiredScope } from '../auth/required-scope.decorator';
 import { GrantAwareVisibility } from '../auth/grant-aware-visibility.service';
-import { isVisibleTo } from '../auth/visibility';
+import { isVisibleTo, personalRootFor } from '../auth/visibility';
 import { isAdmin } from '../auth/admin.util';
 import { ShareLinksService } from './share-links.service';
 import { ScopedTokenService } from './scoped-token.service';
@@ -68,6 +68,15 @@ function defaultTtlForPath(path: string): number | null {
 }
 
 /**
+ * The owner of a personal folder controls every public link into it, not only
+ * the ones she made: a write grantee may publish her note, and minting hands
+ * the owner that same code back. Shared-vault links stay with their creator.
+ */
+function ownsPersonalPath(path: string, email: string): boolean {
+  return path.startsWith(personalRootFor(email) + '/');
+}
+
+/**
  * Synthetic identity used when an unauthenticated viewer arrives via a share
  * link. Never associated with a real user record — purely a stable string the
  * PIN unlock token can be keyed against.
@@ -95,7 +104,9 @@ export class ShareLinksController {
 
   @Post()
   @UseGuards(CombinedAuthGuard)
-  @RequiredScope('notes:read')
+  // Publishing is a write, like revoking: a read-only key must not be able to
+  // expose a note, and the link would outlive the key.
+  @RequiredScope('notes:edit')
   async create(
     @Body() body: {
       path: string;
@@ -131,8 +142,9 @@ export class ShareLinksController {
   }
 
   /** Update a setting on an existing share link without re-minting. Today
-   * only `allow_guest_comments` is mutable. Same gate as revoke: creator or
-   * admin (legacy null-creator rows fall back to path-owner). */
+   * only `allow_guest_comments` is mutable. Same gate as revoke: creator,
+   * personal-folder owner or admin (legacy null-creator rows fall back to
+   * path-owner). */
   @Patch(':code')
   @UseGuards(CombinedAuthGuard)
   @RequiredScope('notes:edit')
@@ -150,8 +162,8 @@ export class ShareLinksController {
       info.createdByEmail.toLowerCase() === email;
     const legacyOwnerFallback =
       info.createdByEmail === null && isVisibleTo(info.path, email);
-    if (!isAdmin(email) && !isCreator && !legacyOwnerFallback) {
-      throw new ForbiddenException('Only the link creator or an admin may update this link');
+    if (!isAdmin(email) && !isCreator && !legacyOwnerFallback && !ownsPersonalPath(info.path, email)) {
+      throw new ForbiddenException('Only the link creator, the note owner or an admin may update this link');
     }
 
     if (typeof body.allow_guest_comments === 'boolean') {
@@ -180,8 +192,8 @@ export class ShareLinksController {
     const legacyOwnerFallback =
       info.createdByEmail === null && isVisibleTo(info.path, email);
 
-    if (!isAdmin(email) && !isCreator && !legacyOwnerFallback) {
-      throw new ForbiddenException('Only the link creator or an admin may revoke');
+    if (!isAdmin(email) && !isCreator && !legacyOwnerFallback && !ownsPersonalPath(info.path, email)) {
+      throw new ForbiddenException('Only the link creator, the note owner or an admin may revoke');
     }
     await this.shareLinksService.revoke(code);
     return { ok: true };

@@ -11,7 +11,7 @@ export class StarsController {
   @Get()
   @RequiredScope('stars:read')
   async list(@Req() req: { user: JwtPayload }) {
-    return this.starsService.listByUser(req.user.sub);
+    return this.starsService.listByUser(req.user.sub, req.user.email);
   }
 
   @Post()

@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { describe, it, before, after, beforeEach } from 'node:test';
 import * as assert from 'node:assert/strict';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
@@ -121,6 +122,48 @@ describe('FilesService — grant cascade on delete', () => {
 
     assert.equal(await grants.findActive(`${folder}/a.md`, BOB), null);
     assert.equal(await grants.findActive(`${folder}/sub/b.md`, BOB), null);
+  });
+});
+
+describe('FilesService — a write grantee edits content, not structure', () => {
+  const note = `_users/${ALICE}/n.md`;
+
+  beforeEach(async () => {
+    await routing.ensurePersonalFolder(BOB);
+    await service.createFile(note, 'alice', undefined, undefined, ALICE);
+    await grants.mint({ grantorEmail: ALICE, granteeEmail: BOB, path: note, permission: 'write' });
+  });
+
+  async function assertUntouched(): Promise<void> {
+    assert.equal(await service.readFile(note, ALICE), 'alice');
+    assert.ok(await grants.findActive(note, BOB), 'grant still on the note');
+  }
+
+  it('cannot move the owner\'s note to the shared vault (the first hop out of her folder)', async () => {
+    await assert.rejects(() => service.move(note, 'n.md', BOB), ForbiddenException);
+    await assertUntouched();
+    assert.equal(await routing.exists('n.md'), false);
+  });
+
+  it('cannot rename it inside her folder either', async () => {
+    // The new name is not his to see, so this one is a 404.
+    await assert.rejects(() => service.move(note, `_users/${ALICE}/renamed.md`, BOB), NotFoundException);
+    await assertUntouched();
+  });
+
+  it('cannot move a shared note into her folder through a grant on the destination', async () => {
+    await service.createFile('Plan.md', 'plan', undefined, undefined, BOB);
+    const dest = `_users/${ALICE}/Plan.md`;
+    await grants.mint({ grantorEmail: ALICE, granteeEmail: BOB, path: dest, permission: 'write' });
+    await assert.rejects(() => service.move('Plan.md', dest, BOB), ForbiddenException);
+    assert.equal(await routing.exists('Plan.md'), true);
+  });
+
+  it('still edits it, and the owner still moves it', async () => {
+    await service.createFile(note, 'bob edit', undefined, undefined, BOB);
+    assert.equal(await service.readFile(note, ALICE), 'bob edit');
+    await service.move(note, `_users/${ALICE}/renamed.md`, ALICE);
+    assert.ok(await grants.findActive(`_users/${ALICE}/renamed.md`, BOB));
   });
 });
 

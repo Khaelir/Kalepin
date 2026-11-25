@@ -900,7 +900,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           if (this.encryptionPredicates.isE2EEncrypted(notePath)) {
             return { content: [{ type: 'text' as const, text: `kind: e2e-encrypted\npath: ${notePath}\nThe server keeps no content history for end-to-end encrypted notes.` }] };
           }
-          const history = await versionHistory.getHistory(notePath);
+          const history = await versionHistory.getHistory(notePath, email);
           const changes = history.slice(0, limit ?? 20).map((h) => ({
             change_id: h.id,
             action: h.action,
@@ -934,11 +934,11 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           if (this.encryptionPredicates.isE2EEncrypted(notePath)) {
             return { content: [{ type: 'text' as const, text: `kind: e2e-encrypted\npath: ${notePath}\nThe server keeps no content history for end-to-end encrypted notes.` }] };
           }
-          const change = (await versionHistory.getHistory(notePath)).find((h) => h.id === change_id);
+          const change = (await versionHistory.getHistory(notePath, email)).find((h) => h.id === change_id);
           if (!change) {
             return { content: [{ type: 'text' as const, text: `No change ${change_id} in the history of ${notePath}. Use note_history to list its changes.` }] };
           }
-          const { content, partial } = await versionHistory.reconstructVersion(notePath, change_id);
+          const { content, partial } = await versionHistory.reconstructVersion(notePath, change_id, email);
           const header = [
             `path: ${notePath}`,
             `change_id: ${change_id}`,
@@ -1118,7 +1118,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     server.registerTool(
       'move_note',
       {
-        description: 'Move or rename a note, like dragging it to another folder in the Kalepin UI. Its stable id and /doc/<id> URL stay the same, links to it in other notes are rewritten, and its comments, share links and grants follow it. Fails if a note already exists at the destination. Moving a note out of your personal folder makes it visible to everyone who can see the destination folder. Notes cannot be moved into or out of the encrypted folder (_secure/) here.',
+        description: 'Move or rename a note, like dragging it to another folder in the Kalepin UI. Its stable id and /doc/<id> URL stay the same, links to it in other notes are rewritten, and its comments follow it. Its share links and grants follow it too, except on a move between the shared vault and a personal folder, which revokes them. Fails if a note already exists at the destination. Moving a note out of your personal folder makes it visible to everyone who can see the destination folder. Notes cannot be moved into or out of the encrypted folder (_secure/) here.',
         inputSchema: {
           path: z.string().optional().describe('Current path of the note (e.g. "inbox/idea.md")'),
           id: z.string().optional().describe(NOTE_ID_DESCRIPTION),
@@ -1208,13 +1208,13 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
           }
           // Before the snapshot below, so a read-only grant leaves no history row behind.
           await this.filesService.assertWritable(notePath, email);
-          const change = (await versionHistory.getHistory(notePath)).find((h) => h.id === change_id);
+          const change = (await versionHistory.getHistory(notePath, email)).find((h) => h.id === change_id);
           if (!change) {
             return { content: [{ type: 'text' as const, text: `No change ${change_id} in the history of ${notePath}. Use note_history to list its changes.` }] };
           }
           const current = await this.filesService.readFile(notePath, email);
           this.filesService.validateBaseHash(current, base_hash);
-          const { content: restored, partial } = await versionHistory.reconstructVersion(notePath, change_id);
+          const { content: restored, partial } = await versionHistory.reconstructVersion(notePath, change_id, email);
           if (partial) {
             throw new Error(`Change ${change_id} of ${notePath} cannot be rebuilt exactly (a step in its history no longer applies), so nothing was restored. read_version shows the partial text.`);
           }
