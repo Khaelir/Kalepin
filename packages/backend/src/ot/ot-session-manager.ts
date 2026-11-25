@@ -27,6 +27,8 @@ interface DocumentSession {
   lastFlushedContent: string;
   /** Failed flushes in a row, for the retry backoff. */
   failedFlushes: number;
+  /** closeSession is running. */
+  closing: boolean;
 }
 
 /** First retry after a failed flush; doubles on each failure up to the cap. */
@@ -77,6 +79,7 @@ export class OTSessionManager {
         dirty: false,
         lastFlushedContent: initialContent,
         failedFlushes: 0,
+        closing: false,
       };
       this.sessions.set(docId, session);
       this.logger.debug(`New session for "${docId}", content length=${initialContent?.length}`);
@@ -354,8 +357,18 @@ export class OTSessionManager {
 
   private async closeSession(docId: string): Promise<void> {
     const session = this.sessions.get(docId);
-    if (!session) return;
+    // A close already in progress re-checks clients and edits before it
+    // deletes anything.
+    if (!session || session.closing) return;
+    session.closing = true;
+    try {
+      await this.closeSessionOnce(docId, session);
+    } finally {
+      session.closing = false;
+    }
+  }
 
+  private async closeSessionOnce(docId: string, session: DocumentSession): Promise<void> {
     this.logger.debug(`Closing session "${docId}", dirty=${session.dirty}, rev=${session.revision}`);
 
     if (session.flushTimer) clearTimeout(session.flushTimer);
@@ -373,17 +386,38 @@ export class OTSessionManager {
     }
 
     // Race guard: a new client may have joined during the async flush
-    if (session.clients.size > 0) {
-      this.logger.debug(`New clients joined "${docId}" during close flush, keeping session alive`);
-      this.resetInactivityTimer(docId);
-      return;
-    }
+    if (this.keepAliveAfterClose(docId, session)) return;
 
     if (this.onSessionClose) {
-      await this.onSessionClose(docId);
+      try {
+        await this.onSessionClose(docId);
+      } catch (err) {
+        this.logger.error(`Session-close handler failed for "${docId}"`, err);
+      }
     }
+
+    // And again: a client that re-joined while the close handler ran (git
+    // commit, embedding drain) is attached to this session object, so
+    // deleting it would leave that client editing an orphan.
+    if (this.keepAliveAfterClose(docId, session)) return;
 
     this.sessions.delete(docId);
     this.logger.debug(`Session deleted for "${docId}"`);
+  }
+
+  /**
+   * True when a closing session must stay: it was dropped or re-keyed in
+   * the meantime (not ours to delete), or a client or an edit arrived.
+   */
+  private keepAliveAfterClose(docId: string, session: DocumentSession): boolean {
+    if (this.sessions.get(docId) !== session) return true;
+    if (session.clients.size === 0 && !session.dirty) return false;
+    this.logger.debug(`"${docId}" got clients or edits while closing, keeping session alive`);
+    if (session.dirty) {
+      this.scheduleDebouncedFlush(docId);
+    } else {
+      this.resetInactivityTimer(docId);
+    }
+    return true;
   }
 }

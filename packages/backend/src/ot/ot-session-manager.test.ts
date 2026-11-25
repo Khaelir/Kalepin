@@ -88,6 +88,49 @@ describe('OTSessionManager — failed final save', () => {
   });
 });
 
+describe('OTSessionManager — closing while a client comes back', () => {
+  // The "did a client re-join?" check ran before the close handler (git
+  // commit, embedding drain), and the session was deleted after it anyway:
+  // a client that re-joined in between edited an orphan whose ops were all
+  // rejected.
+  it('keeps the session a client re-joins while the close handler runs', async () => {
+    let finishClose: (() => void) | undefined;
+    manager.setSessionCloseHandler(() => new Promise<void>((resolve) => { finishClose = resolve; }));
+    const session = manager.getOrCreateSession('a.md', 'abc');
+    const ws = fakeWs();
+    manager.addClient('a.md', ws, 1, 'alice@example.com');
+    manager.applyOperation('a.md', insert('d', 3, 3), 0, 1);
+
+    manager.removeClient('a.md', ws); // switches to another note...
+    await settle();
+    assert.ok(finishClose, 'final flush done, close handler running');
+
+    const again = manager.getOrCreateSession('a.md', 'from disk'); // ...and comes back
+    manager.addClient('a.md', ws, 1, 'alice@example.com');
+    assert.equal(again, session);
+    finishClose!();
+    await settle();
+
+    assert.equal(manager.getSession('a.md'), session, 'the re-joined session is still the live one');
+    assert.ok(manager.applyOperation('a.md', insert('Z', 0, 4), session.revision, 1));
+    assert.equal(session.content, 'Zabcd');
+  });
+
+  it('still deletes the session when nobody came back', async () => {
+    let closed = 0;
+    manager.setSessionCloseHandler(async () => { closed++; });
+    manager.getOrCreateSession('a.md', 'abc');
+    const ws = fakeWs();
+    manager.addClient('a.md', ws, 1, 'alice@example.com');
+
+    manager.removeClient('a.md', ws);
+    await settle();
+
+    assert.equal(closed, 1);
+    assert.equal(manager.getSession('a.md'), undefined);
+  });
+});
+
 describe('OTSessionManager — revisions kept for transforms', () => {
   // History was read at the absolute revision, but a reset empties it and a
   // flush trims it to 1000 ops: every concurrent op then came back null
