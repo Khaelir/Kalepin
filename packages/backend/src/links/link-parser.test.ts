@@ -1,6 +1,14 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { parseLinksFromMarkdown, resolveWikilink, resolveMarkdownLink } from './link-parser';
+import {
+  parseLinksFromMarkdown,
+  resolveWikilink,
+  resolveMarkdownLink,
+  canLinkTo,
+  linkTargetEdits,
+  applyTextEdits,
+  renamedWikilinkTarget,
+} from './link-parser';
 
 describe('parseLinksFromMarkdown', () => {
   it('extracts wikilinks', () => {
@@ -98,6 +106,11 @@ Also [ref](other.md)`;
     assert.equal(links[0].rawTarget, 'Architecture');
   });
 
+  it('reads the escaped alias pipe of a link in a table cell', () => {
+    const links = parseLinksFromMarkdown('| [[Meeting Notes\\|notes]] | [[docs/Architecture#API\\|API]] |');
+    assert.deepEqual(links.map((l) => l.rawTarget), ['Meeting Notes', 'docs/Architecture']);
+  });
+
   it('handles heading with path [[dir/Page#Heading]]', () => {
     const links = parseLinksFromMarkdown('See [[docs/Architecture#API Design]]');
     assert.equal(links.length, 1);
@@ -162,6 +175,94 @@ describe('resolveWikilink', () => {
   it('resolves empty fragment [[Page#]] same as [[Page]]', () => {
     const result = resolveWikilink('Architecture#', 'index.md', allPaths);
     assert.equal(result, 'docs/Architecture.md');
+  });
+});
+
+describe('linkTargetEdits', () => {
+  const content = [
+    'a [[ Plan#Goals | the goals ]] b [[Planning]] [[#Plan]]',
+    '[see](./Plan.md) ![[Plan]] [[Plan|alias]] [Plan](Planning.md)',
+  ].join('\r\n');
+
+  it('locates every link target where it is written', () => {
+    const links = parseLinksFromMarkdown(content);
+    assert.equal(links.length, 6);
+    for (const link of links) {
+      assert.equal(content.substr(link.index, link.rawTarget.length), link.rawTarget);
+    }
+  });
+
+  it('replaces only the targets the callback changes, keeping headings and aliases', () => {
+    const edits = linkTargetEdits(content, (link) =>
+      link.rawTarget === 'Plan' ? 'Roadmap' : link.rawTarget === './Plan.md' ? './Roadmap.md' : null,
+    );
+    assert.equal(applyTextEdits(content, edits), [
+      'a [[ Roadmap#Goals | the goals ]] b [[Planning]] [[#Plan]]',
+      '[see](./Roadmap.md) ![[Plan]] [[Roadmap|alias]] [Plan](Planning.md)',
+    ].join('\r\n'));
+  });
+});
+
+describe('renamedWikilinkTarget', () => {
+  const oldPath = 'Projects/sub/Plan.md';
+  const newPath = 'Projects/sub/Roadmap.md';
+  const paths = [newPath, 'Other/index.md'];
+  const renamed = (raw: string) => renamedWikilinkTarget(raw, oldPath, newPath, 'Other/index.md', paths);
+
+  it('keeps the form the link was written in', () => {
+    assert.equal(renamed('Plan'), 'Roadmap');
+    assert.equal(renamed('plan.md'), 'Roadmap.md');
+    assert.equal(renamed('Projects/sub/Plan'), 'Projects/sub/Roadmap');
+    assert.equal(renamed('sub/Plan'), 'sub/Roadmap');
+    assert.equal(renamed('elsewhere/Plan'), 'elsewhere/Roadmap');
+  });
+
+  it('follows a move to another folder', () => {
+    const moved = (raw: string) =>
+      renamedWikilinkTarget(raw, oldPath, 'Archive/Plan.md', 'Other/index.md', ['Archive/Plan.md']);
+    assert.equal(moved('Plan'), 'Plan');
+    assert.equal(moved('Projects/sub/Plan'), 'Archive/Plan');
+    assert.equal(moved('sub/Plan'), 'Archive/Plan');
+  });
+});
+
+describe('resolveWikilink — personal folders', () => {
+  const alice = '_users/alice@example.com';
+  const bob = '_users/bob@example.com';
+  const allPaths = [
+    'Notes/Roadmap.md',
+    `${alice}/Roadmap.md`,
+    `${alice}/Diary.md`,
+    `${bob}/Ideas.md`,
+  ];
+
+  it("never resolves a shared note's link to a personal note", () => {
+    assert.equal(resolveWikilink('Diary', 'Notes/index.md', allPaths), null);
+    assert.equal(resolveWikilink(`${alice}/Diary`, 'Notes/index.md', allPaths), null);
+    assert.equal(resolveWikilink('Roadmap', 'Notes/index.md', allPaths), 'Notes/Roadmap.md');
+  });
+
+  it("never resolves a personal note's link to another user's note", () => {
+    assert.equal(resolveWikilink('Diary', `${bob}/todo.md`, allPaths), null);
+    assert.equal(resolveWikilink(`${alice}/Diary.md`, `${bob}/todo.md`, allPaths), null);
+    assert.equal(resolveWikilink('Ideas', `${alice}/todo.md`, allPaths), null);
+  });
+
+  it("prefers the owner's own note to a shared note of the same name", () => {
+    assert.equal(resolveWikilink('Roadmap', `${alice}/sub/todo.md`, allPaths), `${alice}/Roadmap.md`);
+    assert.equal(resolveWikilink('Roadmap', `${bob}/todo.md`, allPaths), 'Notes/Roadmap.md');
+    assert.equal(resolveWikilink('Notes/Roadmap', `${alice}/todo.md`, allPaths), 'Notes/Roadmap.md');
+  });
+});
+
+describe('canLinkTo', () => {
+  it('lets shared notes reach shared notes, personal notes their own and shared notes', () => {
+    assert.equal(canLinkTo('a.md', 'b/c.md'), true);
+    assert.equal(canLinkTo('a.md', '_users/alice@example.com/c.md'), false);
+    assert.equal(canLinkTo('_users/alice@example.com/a.md', '_users/alice@example.com/x/c.md'), true);
+    assert.equal(canLinkTo('_users/alice@example.com/a.md', 'c.md'), true);
+    assert.equal(canLinkTo('_users/alice@example.com/a.md', '_users/alice@example.com.evil/c.md'), false);
+    assert.equal(canLinkTo('_users/bob@example.com/a.md', '_users/alice@example.com/c.md'), false);
   });
 });
 

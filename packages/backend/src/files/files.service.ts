@@ -450,8 +450,8 @@ export class FilesService extends EventEmitter {
       if (await this.storage.exists(srcSidecar)) {
         await this.storage.move(srcSidecar, destSidecar);
       }
-      // Rewrite links across the vault pointing to the old path
-      if (dest.endsWith('.md') && this.linkIndex) {
+      // Rewrite links across the vault pointing to the old path (or into a moved folder)
+      if (this.linkIndex) {
         await this.linkIndex.rewriteLinksOnRename(src, dest);
       }
       // Rewrite _attachments/ relative paths in .md files

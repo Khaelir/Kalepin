@@ -4,10 +4,20 @@ import { Repository, DataSource, In, IsNull } from 'typeorm';
 import { STORAGE_ADAPTER, StorageAdapter } from '../storage';
 import { FileWatcherService } from '../files/file-watcher.service';
 import { NoteLink } from '../entities';
-import { FileEntry } from '@kalepin/shared';
-import { parseLinksFromMarkdown, resolveWikilink, resolveMarkdownLink } from './link-parser';
+import { FileChangeEvent, FileEntry } from '@kalepin/shared';
+import {
+  parseLinksFromMarkdown,
+  resolveWikilink,
+  resolveMarkdownLink,
+  canLinkTo,
+  linkTargetEdits,
+  applyTextEdits,
+  renamedWikilinkTarget,
+  relativeMarkdownTarget,
+} from './link-parser';
 import { OTService } from '../ot/ot.service';
-import { isVisibleTo } from '../auth/visibility';
+import { isVisibleTo, personalRootFor } from '../auth/visibility';
+import { isE2EPath } from '../crypto/encryption-predicates';
 import { GrantAwareVisibility } from '../auth/grant-aware-visibility.service';
 import { escapeLike } from '../auth/like-escape';
 import * as path from 'path';
@@ -53,6 +63,8 @@ export interface GraphData {
 }
 
 const LINK_HEAL_SWEEP_INTERVAL_MS = 10 * 60_000;
+/** Bump when the indexing or resolution rules change: boot then rebuilds the index. */
+export const LINK_INDEX_VERSION = 1;
 
 @Injectable()
 export class LinkIndexService {
@@ -89,19 +101,19 @@ export class LinkIndexService {
 
   async onModuleInit() {
     // Build path list
-    this.allPaths = await this.collectMarkdownFiles('');
+    this.allPaths = await this.collectMarkdownFiles();
 
     await this.createMetaTable();
 
-    // Full scan if table is empty
+    // Full scan if table is empty, or was built under older resolution rules
     const count = await this.linkRepo.count();
-    if (count === 0) {
+    if (count === 0 || (await this.storedIndexVersion()) !== LINK_INDEX_VERSION) {
       await this.fullScan();
     }
 
-    // Subscribe to file watcher for incremental updates
-    this.fileWatcher.onFileChange(async (event) => {
-      if (!event.path.endsWith('.md')) return;
+    // Subscribe to file watcher for incremental updates, shared vault and personal folders
+    const onChange = async (event: FileChangeEvent) => {
+      if (!this.isIndexable(event.path)) return;
 
       if (event.event === 'add') {
         const isNew = this.trackPath(event.path);
@@ -126,11 +138,13 @@ export class LinkIndexService {
         await this.removeFile(event.path);
         await this.clearIndexedMtime(event.path);
       }
-    });
+    };
+    this.fileWatcher.onFileChange(onChange);
+    this.fileWatcher.onPersonalChange(onChange);
 
     // Internal-write fast path: indexer consumes content with no disk read.
     this.fileWatcher.onInternalWrite(async (notePath, content) => {
-      if (!notePath.endsWith('.md')) return;
+      if (!this.isIndexable(notePath)) return;
       const isNew = this.trackPath(notePath);
       try {
         await this.indexFile(notePath, content);
@@ -159,6 +173,21 @@ export class LinkIndexService {
         indexed_mtime INTEGER
       )
     `);
+    await this.dataSource.query(`CREATE TABLE IF NOT EXISTS note_links_version (version INTEGER NOT NULL)`);
+  }
+
+  private async storedIndexVersion(): Promise<number | null> {
+    const rows: { version: number }[] = await this.dataSource.query(`SELECT version FROM note_links_version`);
+    return rows.length > 0 ? Number(rows[0].version) : null;
+  }
+
+  /** False for E2E paths (`_users/{email}/_secure/…`) and anything inside a dot-folder. */
+  private isIndexableLocation(p: string): boolean {
+    return !p.split('/').some((segment) => segment.startsWith('.')) && !isE2EPath(p);
+  }
+
+  private isIndexable(p: string): boolean {
+    return p.endsWith('.md') && this.isIndexableLocation(p);
   }
 
   private async setIndexedMtimeFromDisk(filePath: string): Promise<void> {
@@ -231,21 +260,45 @@ export class LinkIndexService {
   }
 
   /**
-   * Point links left unresolved at a note that now exists. Without this, a
-   * [[link]] written before its target note stays broken until the linking
-   * note is edited: the heal sweep only re-parses files whose mtime moved.
+   * Where a link resolves among `paths`: a wikilink by name, a markdown link
+   * by relative path. Either way only to a note its source may link to.
+   */
+  private resolveTarget(
+    link: Pick<NoteLink, 'rawTarget' | 'linkType' | 'sourcePath'>,
+    paths: string[],
+  ): string | null {
+    if (link.linkType === 'wikilink') return resolveWikilink(link.rawTarget, link.sourcePath, paths);
+    const target = resolveMarkdownLink(link.rawTarget, link.sourcePath);
+    return paths.includes(target) && canLinkTo(link.sourcePath, target) ? target : null;
+  }
+
+  /**
+   * Point links at a note that now exists: links left unresolved, and
+   * wikilinks naming it that resolved to another note (a personal note's own
+   * same-named note wins over a shared one). Without this, such a link stays
+   * broken or wrong until the linking note is edited: the heal sweep only
+   * re-parses files whose mtime moved.
    */
   async resolveLinksTo(newPath: string): Promise<void> {
     try {
-      const unresolved = await this.linkRepo.find({ where: { targetPath: IsNull() } });
-      const ids = unresolved
-        .filter((l) => (l.linkType === 'wikilink'
-          ? resolveWikilink(l.rawTarget, l.sourcePath, this.allPaths)
-          : resolveMarkdownLink(l.rawTarget, l.sourcePath)) === newPath)
-        .map((l) => l.id);
-      if (ids.length === 0) return;
-      // A guarded UPDATE, not save(): a row deleted meanwhile by a re-index must stay deleted.
-      await this.linkRepo.update({ id: In(ids), targetPath: IsNull() }, { targetPath: newPath });
+      const pattern = `%${escapeLike(path.basename(newPath, '.md'))}%`;
+      const rows = await this.linkRepo
+        .createQueryBuilder('l')
+        .where('l.targetPath IS NULL')
+        .orWhere(`l.linkType = 'wikilink' AND l.rawTarget LIKE :pattern ESCAPE '\\'`, { pattern })
+        .getMany();
+      const idsByOldTarget = new Map<string | null, number[]>();
+      for (const l of rows) {
+        if (l.targetPath === newPath || this.resolveTarget(l, this.allPaths) !== newPath) continue;
+        idsByOldTarget.set(l.targetPath, [...(idsByOldTarget.get(l.targetPath) ?? []), l.id]);
+      }
+      // Guarded UPDATEs, not save(): a row a re-index deleted or re-resolved meanwhile must stay as it is.
+      for (const [oldTarget, ids] of idsByOldTarget) {
+        await this.linkRepo.update(
+          { id: In(ids), targetPath: oldTarget === null ? IsNull() : oldTarget },
+          { targetPath: newPath },
+        );
+      }
     } catch (err) {
       this.logger.warn(`resolving links to "${newPath}" failed: ${(err as Error).message}`);
     }
@@ -281,16 +334,7 @@ export class LinkIndexService {
       noteLink.linkType = link.linkType;
       noteLink.lineNumber = link.lineNumber;
       noteLink.context = link.context;
-
-      if (link.linkType === 'wikilink') {
-        noteLink.targetPath = resolveWikilink(link.rawTarget, filePath, this.allPaths);
-      } else {
-        noteLink.targetPath = resolveMarkdownLink(link.rawTarget, filePath);
-        // Verify target exists
-        if (!this.allPaths.includes(noteLink.targetPath)) {
-          noteLink.targetPath = null;
-        }
-      }
+      noteLink.targetPath = this.resolveTarget(noteLink, this.allPaths);
 
       links.push(noteLink);
     }
@@ -303,8 +347,9 @@ export class LinkIndexService {
   async fullScan(): Promise<void> {
     this.logger.log('Starting full vault link scan...');
     const t0 = Date.now();
-    this.allPaths = await this.collectMarkdownFiles('');
+    this.allPaths = await this.collectMarkdownFiles();
     await this.createMetaTable();
+    await this.linkRepo.clear();
     await this.dataSource.query(`DELETE FROM note_links_meta`);
 
     let indexed = 0;
@@ -318,6 +363,8 @@ export class LinkIndexService {
         // Skip unreadable files
       }
     }
+    await this.dataSource.query(`DELETE FROM note_links_version`);
+    await this.dataSource.query(`INSERT INTO note_links_version (version) VALUES (?)`, [LINK_INDEX_VERSION]);
     this.logger.log(`Full link scan complete: ${indexed} files indexed in ${Date.now() - t0}ms`);
   }
 
@@ -453,87 +500,106 @@ export class LinkIndexService {
 
   // --- Rename support ---
 
+  /**
+   * Follow a move of a note or a folder: every link that resolved to a moved
+   * note is rewritten to reach its new path (through OT when the linking note
+   * is open), and its index row follows. Nothing else in the linking notes
+   * changes. A link from a note that may not reach the new path, or to a note
+   * moved out of the index (end-to-end encrypted folder), keeps its text and
+   * is re-resolved.
+   */
   async rewriteLinksOnRename(oldPath: string, newPath: string): Promise<void> {
-    // Find all notes that link to the old path
-    const linksToOld = await this.linkRepo.find({ where: { targetPath: oldPath } });
-    if (linksToOld.length === 0) return;
+    /** Where a note, or anything under a moved folder, is now. */
+    const moved = (p: string) =>
+      p === oldPath ? newPath : p.startsWith(oldPath + '/') ? newPath + p.slice(oldPath.length) : p;
 
-    const oldBasename = path.basename(oldPath, '.md');
-    const newBasename = path.basename(newPath, '.md');
+    // Find all notes that link to the moved notes
+    const linksToOld = await this.linkRepo
+      .createQueryBuilder('l')
+      .where('l.targetPath = :oldPath', { oldPath })
+      .orWhere(`l.targetPath LIKE :under ESCAPE '\\'`, { under: escapeLike(oldPath) + '/%' })
+      .getMany();
+    // Each moved note's new path, or null when it is no longer indexed.
+    const moves = new Map<string, string | null>();
+    for (const p of [...this.allPaths, ...linksToOld.map((l) => l.targetPath!)]) {
+      if (moved(p) !== p) moves.set(p, this.isIndexable(moved(p)) ? moved(p) : null);
+    }
+    if (moves.size === 0) return;
+    const { before, after } = this.pathsAroundMoves(moves);
+    this.allPaths = after;
 
-    for (const link of linksToOld) {
+    // A link follows a move when it did resolve to the moved note (the row
+    // may be stale) and its note, still indexed, may reach the new path.
+    const followedMove = (
+      l: Pick<NoteLink, 'rawTarget' | 'linkType' | 'sourcePath'>,
+    ): { from: string; to: string } | null => {
+      const from = this.resolveTarget(l, before);
+      const to = from === null ? null : moves.get(from);
+      const source = moved(l.sourcePath);
+      return from !== null && to && this.isIndexable(source) && canLinkTo(source, to) ? { from, to } : null;
+    };
+
+    for (const sourcePath of new Set(linksToOld.filter((l) => followedMove(l)).map((l) => l.sourcePath))) {
+      const source = moved(sourcePath);
+      const edits = (content: string) => linkTargetEdits(content, (link) => {
+        const move = followedMove({ ...link, sourcePath });
+        if (!move) return null;
+        return link.linkType === 'wikilink'
+          ? renamedWikilinkTarget(link.rawTarget, move.from, move.to, source, after)
+          : relativeMarkdownTarget(link.rawTarget, source, move.to);
+      });
       try {
-        // Compute the old and new text for this link
-        let oldText: string;
-        let newText: string;
-
-        if (link.linkType === 'wikilink') {
-          const newTarget = link.rawTarget.includes('/')
-            ? link.rawTarget.replace(oldBasename, newBasename)
-            : newBasename;
-          // For OT replacement we match exact wikilink text (without alias part)
-          oldText = `[[${link.rawTarget}`;
-          newText = `[[${newTarget}`;
-        } else {
-          const sourceDir = path.dirname(link.sourcePath);
-          const newRelative = path.posix.relative(sourceDir, newPath);
-          oldText = `](${link.rawTarget})`;
-          newText = `](${newRelative})`;
-        }
-
-        // Check if source file has an active OT session
-        const session = this.otService?.sessionManager?.getSession(link.sourcePath);
-        if (session) {
-          // Emit OT operation instead of writing to disk
-          const result = await this.otService!.applyServerReplacement(
-            link.sourcePath,
-            oldText,
-            newText,
-          );
+        // An open note is still keyed by its old path: sessions follow the move after this.
+        if (this.otService?.sessionManager?.getSession(sourcePath)) {
+          const result = await this.otService.applyServerReplacement(sourcePath, edits);
           if (result) {
-            this.otBroadcast?.(link.sourcePath, result.ops, result.revision);
+            this.otBroadcast?.(sourcePath, result.ops, result.revision);
           }
         } else {
-          // No active session — read-replace-write to disk
-          const content = await this.storage.read(link.sourcePath);
-          let updated = content;
-
-          if (link.linkType === 'wikilink') {
-            const escapedRaw = link.rawTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const wikilinkRegex = new RegExp(`\\[\\[${escapedRaw}(\\|[^\\]]*)?\\]\\]`, 'g');
-            updated = updated.replace(wikilinkRegex, (_match, alias) => {
-              const newTarget = link.rawTarget.includes('/')
-                ? link.rawTarget.replace(oldBasename, newBasename)
-                : newBasename;
-              return `[[${newTarget}${alias || ''}]]`;
-            });
-          } else {
-            const sourceDir = path.dirname(link.sourcePath);
-            const newRelative = path.posix.relative(sourceDir, newPath);
-            const escapedRaw = link.rawTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const mdLinkRegex = new RegExp(`(\\[[^\\]]*\\])\\(${escapedRaw}\\)`, 'g');
-            updated = updated.replace(mdLinkRegex, `$1(${newRelative})`);
-          }
-
+          const content = await this.storage.read(source);
+          const updated = applyTextEdits(content, edits(content));
           if (updated !== content) {
-            await this.storage.write(link.sourcePath, updated);
+            await this.storage.write(source, updated);
           }
         }
       } catch {
-        this.logger.warn(`Failed to rewrite links in ${link.sourcePath}`);
+        this.logger.warn(`Failed to rewrite links in ${source}`);
       }
     }
 
-    // Update target_path entries in the index
-    await this.linkRepo
-      .createQueryBuilder()
-      .update(NoteLink)
-      .set({ targetPath: newPath })
-      .where('targetPath = :oldPath', { oldPath })
-      .execute();
+    // Index rows follow the move; the others are re-resolved from where their note is now.
+    const ids = new Map<string, Map<string | null, number[]>>();
+    for (const l of linksToOld) {
+      const target = followedMove(l)?.to ?? this.resolveTarget({ ...l, sourcePath: moved(l.sourcePath) }, after);
+      const byTarget = ids.get(l.targetPath!) ?? new Map<string | null, number[]>();
+      byTarget.set(target, [...(byTarget.get(target) ?? []), l.id]);
+      ids.set(l.targetPath!, byTarget);
+    }
+    for (const [oldTarget, byTarget] of ids) {
+      for (const [target, rowIds] of byTarget) {
+        await this.linkRepo.update({ id: In(rowIds), targetPath: oldTarget }, { targetPath: target });
+      }
+    }
 
-    // Update allPaths
-    this.allPaths = this.allPaths.map((p) => (p === oldPath ? newPath : p));
+    // Links naming a new path that were broken until now.
+    for (const dest of moves.values()) if (dest) await this.resolveLinksTo(dest);
+  }
+
+  /**
+   * The note paths before and after `moves` (old path → new path, or null
+   * when the note leaves the index), keeping their order.
+   */
+  private pathsAroundMoves(moves: Map<string, string | null>): { before: string[]; after: string[] } {
+    const dests = new Set([...moves.values()].filter((p): p is string => p !== null));
+    const before = this.allPaths.filter((p) => !dests.has(p));
+    const beforeSet = new Set(before);
+    for (const src of moves.keys()) if (!beforeSet.has(src)) before.push(src);
+    const after = [...new Set(
+      this.allPaths.map((p) => (moves.has(p) ? moves.get(p) : p)).filter((p): p is string => typeof p === 'string'),
+    )];
+    const afterSet = new Set(after);
+    for (const dest of dests) if (!afterSet.has(dest)) after.push(dest);
+    return { before, after };
   }
 
   async getGraphData(centerPath?: string, depth = 2, userEmail?: string): Promise<GraphData> {
@@ -542,6 +608,8 @@ export class LinkIndexService {
     const grants = await this.grantSet(userEmail);
     const visible = (p: string | null) =>
       !userEmail || p === null || isVisibleTo(p, userEmail) || grants.has(p);
+    // A note the viewer cannot see has no graph: its node would echo the path back.
+    if (centerPath && !visible(centerPath)) return { nodes: [], edges: [] };
     const allLinks = allLinksRaw.filter(
       (l) => visible(l.sourcePath) && visible(l.targetPath),
     );
@@ -676,17 +744,35 @@ export class LinkIndexService {
     return { nodes, edges: uniqueEdges };
   }
 
-  private async collectMarkdownFiles(dir: string): Promise<string[]> {
-    const entries = await this.storage.list(dir);
-    return this.flattenMarkdownFiles(entries);
+  /**
+   * Every indexable note. `storage.list('')` only walks the shared vault, so
+   * personal folders are listed one by one from the `users` table.
+   */
+  private async collectMarkdownFiles(): Promise<string[]> {
+    const paths = this.flattenMarkdownFiles(await this.storage.list(''));
+    let users: { email: string }[] = [];
+    try {
+      users = await this.dataSource.query(`SELECT email FROM users`);
+    } catch {
+      // No users table — shared vault only.
+    }
+    for (const u of users) {
+      try {
+        paths.push(...this.flattenMarkdownFiles(await this.storage.list(personalRootFor(u.email))));
+      } catch {
+        // Personal folder not created yet, or no personal storage configured.
+      }
+    }
+    return paths;
   }
 
+  /** Indexable notes of a listing; E2E folders and dot-folders are pruned. */
   private flattenMarkdownFiles(entries: FileEntry[]): string[] {
     const paths: string[] = [];
     for (const entry of entries) {
-      if (entry.type === 'file' && entry.path.endsWith('.md')) {
+      if (entry.type === 'file' && this.isIndexable(entry.path)) {
         paths.push(entry.path);
-      } else if (entry.type === 'directory' && entry.children) {
+      } else if (entry.type === 'directory' && entry.children && this.isIndexableLocation(entry.path)) {
         paths.push(...this.flattenMarkdownFiles(entry.children));
       }
     }

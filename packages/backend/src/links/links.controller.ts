@@ -37,6 +37,7 @@ export class LinksController {
     @Query('path') filePath?: string,
     @Query('depth') depth?: string,
   ) {
+    if (filePath) await this.visibility.assertReadableBy(filePath, req.user.email);
     return this.linkIndexService.getGraphData(
       filePath || undefined,
       depth ? parseInt(depth, 10) : undefined,

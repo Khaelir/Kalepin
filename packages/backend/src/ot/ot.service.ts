@@ -195,32 +195,31 @@ export class OTService {
   }
 
   /**
-   * Apply a server-side text replacement to an open OT session.
-   * Used for wikilink rewriting on file rename — the replacement goes through
-   * the OT pipeline so concurrent user edits are handled correctly.
+   * Apply server-side text edits to an open OT session.
+   * Used for link rewriting on file rename — the replacement goes through
+   * the OT pipeline so concurrent user edits are handled correctly. `edits`
+   * gets the session's current content and returns sorted, non-overlapping
+   * replacements of it.
    * Returns the transformed ops and connected client WebSockets for broadcasting.
    */
   async applyServerReplacement(
     docId: string,
-    oldText: string,
-    newText: string,
+    edits: (content: string) => { index: number; length: number; text: string }[],
   ): Promise<{ ops: OTOperation; revision: number; clients: WebSocket[] } | null> {
     const session = this.sessionManager.getSession(docId);
     if (!session) return null;
 
     const content = session.content;
-    // Build an OT operation that replaces all occurrences of oldText with newText
+    // Build an OT operation that applies every edit
     const components: OTOperation = [];
     let pos = 0;
-    let idx = content.indexOf(oldText, pos);
-    while (idx >= 0) {
-      if (idx > pos) {
-        components.push({ type: 'retain', count: idx - pos });
+    for (const edit of edits(content)) {
+      if (edit.index > pos) {
+        components.push({ type: 'retain', count: edit.index - pos });
       }
-      components.push({ type: 'delete', count: oldText.length });
-      components.push({ type: 'insert', text: newText });
-      pos = idx + oldText.length;
-      idx = content.indexOf(oldText, pos);
+      if (edit.length > 0) components.push({ type: 'delete', count: edit.length });
+      if (edit.text) components.push({ type: 'insert', text: edit.text });
+      pos = edit.index + edit.length;
     }
     // Retain the rest
     if (pos < content.length) {
