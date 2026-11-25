@@ -71,6 +71,11 @@ describe('table markdown round-trip', () => {
     ['an aliased wikilink in a header cell', '| [[Roadmap|the map]] | b |\n| --- | --- |\n| 1 | 2 |\n', '| [[Roadmap\\|the map]] | b |\n| --- | --- |\n| 1 | 2 |\n'],
     ['inline code holding wikilink syntax', table('| `[[a|b]]` | 2 |'), table('| `[[a\\|b]]` | 2 |')],
     ['inline code holding escaped wikilink syntax', table('| `[[a\\|b]]` | 2 |'), table('| `[[a\\|b]]` | 2 |')],
+    ['an image-only cell', table('| ![](_attachments/a.png) | y |'), table('| ![](_attachments/a.png) | y |')],
+    ['an image with alt text and a title', table('| ![chart](_attachments/a.png "Q3") | y |'), table('| ![chart](_attachments/a.png "Q3") | y |')],
+    ['an image with | in its alt text', table('| ![a\\|b](_attachments/a.png) | y |'), table('| ![a\\|b](_attachments/a.png) | y |')],
+    ['text around an image', table('| x ![](_attachments/a.png) y | 2 |'), table('| x ![](_attachments/a.png) y | 2 |')],
+    ['two images in a cell', table('| ![](_attachments/a.png) ![](_attachments/b.png) | 2 |'), table('| ![](_attachments/a.png) ![](_attachments/b.png) | 2 |')],
   ])('keeps %s', (_name, input, expected) => {
     const editor = createEditor(input);
     const output = getMarkdown(editor);
@@ -105,6 +110,22 @@ describe('table markdown round-trip', () => {
   it('leaves pipes outside wikilinks as cell separators', () => {
     const editor = createEditor(table('| [[A|a]] 1|2 |'));
     expect(getMarkdown(editor)).toBe(table('| [[A\\|a]] 1 | 2 |'));
+  });
+
+  it('still saves a table as HTML when a cell holds paragraphs markdown cannot keep apart', () => {
+    const paragraph = (text: string) => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+    const editor = createEditor('');
+    editor.commands.setContent({
+      type: 'doc',
+      content: [{
+        type: 'table',
+        content: [
+          { type: 'tableRow', content: [{ type: 'tableHeader', content: [paragraph('a')] }] },
+          { type: 'tableRow', content: [{ type: 'tableCell', content: [paragraph('one'), paragraph('two')] }] },
+        ],
+      }],
+    });
+    expect(getMarkdown(editor)).toMatch(/^<table/);
   });
 
   it('leaves aliased wikilinks outside tables as they are', () => {

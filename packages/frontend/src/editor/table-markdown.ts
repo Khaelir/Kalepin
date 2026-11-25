@@ -6,8 +6,9 @@ import { TableMap } from 'prosemirror-tables';
 
 /**
  * Check if a table can be safely serialized as markdown.
- * Requires all cells to contain exactly one paragraph child (no headings,
- * blockquotes, code blocks, etc.) and no col/row spans.
+ * Requires all cells to contain only paragraphs and images, with no two
+ * paragraphs in a row (no headings, blockquotes, code blocks, etc.), and no
+ * col/row spans.
  */
 function isMarkdownSerializable(node: PMNode): boolean {
   let ok = true;
@@ -17,9 +18,14 @@ function isMarkdownSerializable(node: PMNode): boolean {
         ok = false;
         return;
       }
-      if (cell.childCount > 1 || (cell.childCount === 1 && cell.firstChild?.type.name !== 'paragraph')) {
-        ok = false;
-      }
+      let previous = '';
+      cell.forEach((child) => {
+        const type = child.type.name;
+        if ((type !== 'paragraph' && type !== 'image') || (type === 'paragraph' && previous === 'paragraph')) {
+          ok = false;
+        }
+        previous = type;
+      });
     });
   });
   // Also require first row to be all tableHeader cells
@@ -33,18 +39,31 @@ function isMarkdownSerializable(node: PMNode): boolean {
 }
 
 /**
- * Render a cell's content to markdown in a scratch serializer state, so the
- * row can decide what to write. The leading "| " gives tiptap-markdown's
+ * Render one child of a cell to markdown in a scratch serializer state, so
+ * the row can decide what to write. The leading "| " gives tiptap-markdown's
  * mark-delimiter trimming the same context it has inside the row.
  */
-function renderCell(state: any, cell: PMNode): string {
-  const cellContent = cell.firstChild;
-  if (!cellContent) return '';
+function renderCellChild(state: any, child: PMNode, cell: PMNode, index: number): string {
   const cellState = new state.constructor(state.nodes, state.marks, state.options);
   cellState.inTable = true;
   cellState.out = '| ';
-  cellState.render(cellContent, cell, 0);
+  cellState.render(child, cell, index);
   return cellState.out.slice(2);
+}
+
+/**
+ * Render a cell to one line of markdown. Images are block nodes, so an
+ * `![](...)` in a cell parses into an image node between paragraphs holding
+ * the text around it; writing the parts back on one line, space-separated,
+ * gives the same cell again.
+ */
+function renderCell(state: any, cell: PMNode): string {
+  const parts: string[] = [];
+  cell.forEach((child, _offset, index) => {
+    const markdown = renderCellChild(state, child, cell, index).trim();
+    if (markdown) parts.push(markdown);
+  });
+  return parts.join(' ');
 }
 
 /** Table extension with fixed markdown serialization for block content in cells. */
