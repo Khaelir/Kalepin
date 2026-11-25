@@ -95,4 +95,33 @@ describe('LinkIndexService — link namespaces', () => {
     assert.equal(files.get('Notes/index.md'), 'See [[Roadmap]].');
     assert.deepEqual(await targetsFrom('Notes/index.md'), [null]);
   });
+
+  it('moving a shared note into a personal folder rewrites only its owner\'s links', async () => {
+    await save('Notes/Plan.md', '# Plan');
+    await save('Notes/index.md', 'See [[Plan]].');
+    await save(`${ALICE}/todo.md`, 'See [[Notes/Plan]].');
+
+    files.set(`${ALICE}/Plan.md`, files.get('Notes/Plan.md')!);
+    files.delete('Notes/Plan.md');
+    await svc.rewriteLinksOnRename('Notes/Plan.md', `${ALICE}/Plan.md`);
+
+    assert.equal(files.get('Notes/index.md'), 'See [[Plan]].');
+    assert.deepEqual(await targetsFrom('Notes/index.md'), [null]);
+    assert.equal(files.get(`${ALICE}/todo.md`), `See [[${ALICE}/Plan]].`);
+    assert.deepEqual(await targetsFrom(`${ALICE}/todo.md`), [`${ALICE}/Plan.md`]);
+  });
+
+  it('leaves links unresolved when their note moves into an end-to-end encrypted folder', async () => {
+    await save(`${ALICE}/Plan.md`, '# Plan');
+    await save(`${ALICE}/todo.md`, 'See [[Plan]].');
+
+    files.set(`${ALICE}/_secure/Plan.md`, files.get(`${ALICE}/Plan.md`)!);
+    files.delete(`${ALICE}/Plan.md`);
+    await svc.rewriteLinksOnRename(`${ALICE}/Plan.md`, `${ALICE}/_secure/Plan.md`);
+
+    assert.equal(files.get(`${ALICE}/todo.md`), 'See [[Plan]].');
+    assert.deepEqual(await targetsFrom(`${ALICE}/todo.md`), [null]);
+    await save(`${ALICE}/later.md`, 'See [[Plan]].');
+    assert.deepEqual(await targetsFrom(`${ALICE}/later.md`), [null]);
+  });
 });

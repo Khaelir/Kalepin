@@ -501,28 +501,42 @@ export class LinkIndexService {
   // --- Rename support ---
 
   /**
-   * Follow a note rename: every link that resolved to `oldPath` is rewritten
-   * to reach `newPath` (through OT when its note is open), and its index row
-   * follows. Nothing else in the linking notes changes. A link from a note
-   * that may not reach `newPath` keeps its text and is re-resolved.
+   * Follow a move of a note or a folder: every link that resolved to a moved
+   * note is rewritten to reach its new path (through OT when the linking note
+   * is open), and its index row follows. Nothing else in the linking notes
+   * changes. A link from a note that may not reach the new path, or to a note
+   * moved out of the index (end-to-end encrypted folder), keeps its text and
+   * is re-resolved.
    */
   async rewriteLinksOnRename(oldPath: string, newPath: string): Promise<void> {
-    const moves = new Map([[oldPath, newPath]]);
+    /** Where a note, or anything under a moved folder, is now. */
+    const moved = (p: string) =>
+      p === oldPath ? newPath : p.startsWith(oldPath + '/') ? newPath + p.slice(oldPath.length) : p;
+
+    // Find all notes that link to the moved notes
+    const linksToOld = await this.linkRepo
+      .createQueryBuilder('l')
+      .where('l.targetPath = :oldPath', { oldPath })
+      .orWhere(`l.targetPath LIKE :under ESCAPE '\\'`, { under: escapeLike(oldPath) + '/%' })
+      .getMany();
+    // Each moved note's new path, or null when it is no longer indexed.
+    const moves = new Map<string, string | null>();
+    for (const p of [...this.allPaths, ...linksToOld.map((l) => l.targetPath!)]) {
+      if (moved(p) !== p) moves.set(p, this.isIndexable(moved(p)) ? moved(p) : null);
+    }
+    if (moves.size === 0) return;
     const { before, after } = this.pathsAroundMoves(moves);
     this.allPaths = after;
-    /** Where a note is now. */
-    const moved = (p: string) => moves.get(p) ?? p;
 
-    // Find all notes that link to the old path
-    const linksToOld = await this.linkRepo.find({ where: { targetPath: In([...moves.keys()]) } });
     // A link follows a move when it did resolve to the moved note (the row
-    // may be stale) and its note may still reach the note's new path.
+    // may be stale) and its note, still indexed, may reach the new path.
     const followedMove = (
       l: Pick<NoteLink, 'rawTarget' | 'linkType' | 'sourcePath'>,
     ): { from: string; to: string } | null => {
       const from = this.resolveTarget(l, before);
-      const to = from === null ? undefined : moves.get(from);
-      return from !== null && to !== undefined && canLinkTo(moved(l.sourcePath), to) ? { from, to } : null;
+      const to = from === null ? null : moves.get(from);
+      const source = moved(l.sourcePath);
+      return from !== null && to && this.isIndexable(source) && canLinkTo(source, to) ? { from, to } : null;
     };
 
     for (const sourcePath of new Set(linksToOld.filter((l) => followedMove(l)).map((l) => l.sourcePath))) {
@@ -567,17 +581,22 @@ export class LinkIndexService {
       }
     }
 
-    // Links naming the new path that were broken until now.
-    for (const dest of moves.values()) await this.resolveLinksTo(dest);
+    // Links naming a new path that were broken until now.
+    for (const dest of moves.values()) if (dest) await this.resolveLinksTo(dest);
   }
 
-  /** The note paths before and after `moves` (old path → new path), keeping their order. */
-  private pathsAroundMoves(moves: Map<string, string>): { before: string[]; after: string[] } {
-    const dests = new Set(moves.values());
+  /**
+   * The note paths before and after `moves` (old path → new path, or null
+   * when the note leaves the index), keeping their order.
+   */
+  private pathsAroundMoves(moves: Map<string, string | null>): { before: string[]; after: string[] } {
+    const dests = new Set([...moves.values()].filter((p): p is string => p !== null));
     const before = this.allPaths.filter((p) => !dests.has(p));
     const beforeSet = new Set(before);
     for (const src of moves.keys()) if (!beforeSet.has(src)) before.push(src);
-    const after = [...new Set(this.allPaths.map((p) => moves.get(p) ?? p))];
+    const after = [...new Set(
+      this.allPaths.map((p) => (moves.has(p) ? moves.get(p) : p)).filter((p): p is string => typeof p === 'string'),
+    )];
     const afterSet = new Set(after);
     for (const dest of dests) if (!afterSet.has(dest)) after.push(dest);
     return { before, after };
