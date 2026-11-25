@@ -5,7 +5,7 @@ import { STORAGE_ADAPTER, StorageAdapter } from '../storage';
 import { FileWatcherService } from '../files/file-watcher.service';
 import { NoteLink } from '../entities';
 import { FileEntry } from '@kalepin/shared';
-import { parseLinksFromMarkdown, resolveWikilink, resolveMarkdownLink } from './link-parser';
+import { parseLinksFromMarkdown, resolveWikilink, resolveMarkdownLink, canLinkTo } from './link-parser';
 import { OTService } from '../ot/ot.service';
 import { isVisibleTo } from '../auth/visibility';
 import { GrantAwareVisibility } from '../auth/grant-aware-visibility.service';
@@ -231,21 +231,45 @@ export class LinkIndexService {
   }
 
   /**
-   * Point links left unresolved at a note that now exists. Without this, a
-   * [[link]] written before its target note stays broken until the linking
-   * note is edited: the heal sweep only re-parses files whose mtime moved.
+   * Where a link resolves among `paths`: a wikilink by name, a markdown link
+   * by relative path. Either way only to a note its source may link to.
+   */
+  private resolveTarget(
+    link: Pick<NoteLink, 'rawTarget' | 'linkType' | 'sourcePath'>,
+    paths: string[],
+  ): string | null {
+    if (link.linkType === 'wikilink') return resolveWikilink(link.rawTarget, link.sourcePath, paths);
+    const target = resolveMarkdownLink(link.rawTarget, link.sourcePath);
+    return paths.includes(target) && canLinkTo(link.sourcePath, target) ? target : null;
+  }
+
+  /**
+   * Point links at a note that now exists: links left unresolved, and
+   * wikilinks naming it that resolved to another note (a personal note's own
+   * same-named note wins over a shared one). Without this, such a link stays
+   * broken or wrong until the linking note is edited: the heal sweep only
+   * re-parses files whose mtime moved.
    */
   async resolveLinksTo(newPath: string): Promise<void> {
     try {
-      const unresolved = await this.linkRepo.find({ where: { targetPath: IsNull() } });
-      const ids = unresolved
-        .filter((l) => (l.linkType === 'wikilink'
-          ? resolveWikilink(l.rawTarget, l.sourcePath, this.allPaths)
-          : resolveMarkdownLink(l.rawTarget, l.sourcePath)) === newPath)
-        .map((l) => l.id);
-      if (ids.length === 0) return;
-      // A guarded UPDATE, not save(): a row deleted meanwhile by a re-index must stay deleted.
-      await this.linkRepo.update({ id: In(ids), targetPath: IsNull() }, { targetPath: newPath });
+      const pattern = `%${escapeLike(path.basename(newPath, '.md'))}%`;
+      const rows = await this.linkRepo
+        .createQueryBuilder('l')
+        .where('l.targetPath IS NULL')
+        .orWhere(`l.linkType = 'wikilink' AND l.rawTarget LIKE :pattern ESCAPE '\\'`, { pattern })
+        .getMany();
+      const idsByOldTarget = new Map<string | null, number[]>();
+      for (const l of rows) {
+        if (l.targetPath === newPath || this.resolveTarget(l, this.allPaths) !== newPath) continue;
+        idsByOldTarget.set(l.targetPath, [...(idsByOldTarget.get(l.targetPath) ?? []), l.id]);
+      }
+      // Guarded UPDATEs, not save(): a row a re-index deleted or re-resolved meanwhile must stay as it is.
+      for (const [oldTarget, ids] of idsByOldTarget) {
+        await this.linkRepo.update(
+          { id: In(ids), targetPath: oldTarget === null ? IsNull() : oldTarget },
+          { targetPath: newPath },
+        );
+      }
     } catch (err) {
       this.logger.warn(`resolving links to "${newPath}" failed: ${(err as Error).message}`);
     }
@@ -281,16 +305,7 @@ export class LinkIndexService {
       noteLink.linkType = link.linkType;
       noteLink.lineNumber = link.lineNumber;
       noteLink.context = link.context;
-
-      if (link.linkType === 'wikilink') {
-        noteLink.targetPath = resolveWikilink(link.rawTarget, filePath, this.allPaths);
-      } else {
-        noteLink.targetPath = resolveMarkdownLink(link.rawTarget, filePath);
-        // Verify target exists
-        if (!this.allPaths.includes(noteLink.targetPath)) {
-          noteLink.targetPath = null;
-        }
-      }
+      noteLink.targetPath = this.resolveTarget(noteLink, this.allPaths);
 
       links.push(noteLink);
     }
@@ -460,8 +475,14 @@ export class LinkIndexService {
 
     const oldBasename = path.basename(oldPath, '.md');
     const newBasename = path.basename(newPath, '.md');
+    // A row from a note that may not link to the renamed note (left by an
+    // older index) must not get its new name written into it.
+    const unreachable = linksToOld.filter(
+      (l) => !canLinkTo(l.sourcePath, oldPath) || !canLinkTo(l.sourcePath, newPath),
+    );
 
     for (const link of linksToOld) {
+      if (unreachable.includes(link)) continue;
       try {
         // Compute the old and new text for this link
         let oldText: string;
@@ -531,6 +552,9 @@ export class LinkIndexService {
       .set({ targetPath: newPath })
       .where('targetPath = :oldPath', { oldPath })
       .execute();
+    if (unreachable.length > 0) {
+      await this.linkRepo.update({ id: In(unreachable.map((l) => l.id)) }, { targetPath: null });
+    }
 
     // Update allPaths
     this.allPaths = this.allPaths.map((p) => (p === oldPath ? newPath : p));

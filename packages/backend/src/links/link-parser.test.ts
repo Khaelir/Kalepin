@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { parseLinksFromMarkdown, resolveWikilink, resolveMarkdownLink } from './link-parser';
+import { parseLinksFromMarkdown, resolveWikilink, resolveMarkdownLink, canLinkTo } from './link-parser';
 
 describe('parseLinksFromMarkdown', () => {
   it('extracts wikilinks', () => {
@@ -162,6 +162,46 @@ describe('resolveWikilink', () => {
   it('resolves empty fragment [[Page#]] same as [[Page]]', () => {
     const result = resolveWikilink('Architecture#', 'index.md', allPaths);
     assert.equal(result, 'docs/Architecture.md');
+  });
+});
+
+describe('resolveWikilink — personal folders', () => {
+  const alice = '_users/alice@example.com';
+  const bob = '_users/bob@example.com';
+  const allPaths = [
+    'Notes/Roadmap.md',
+    `${alice}/Roadmap.md`,
+    `${alice}/Diary.md`,
+    `${bob}/Ideas.md`,
+  ];
+
+  it("never resolves a shared note's link to a personal note", () => {
+    assert.equal(resolveWikilink('Diary', 'Notes/index.md', allPaths), null);
+    assert.equal(resolveWikilink(`${alice}/Diary`, 'Notes/index.md', allPaths), null);
+    assert.equal(resolveWikilink('Roadmap', 'Notes/index.md', allPaths), 'Notes/Roadmap.md');
+  });
+
+  it("never resolves a personal note's link to another user's note", () => {
+    assert.equal(resolveWikilink('Diary', `${bob}/todo.md`, allPaths), null);
+    assert.equal(resolveWikilink(`${alice}/Diary.md`, `${bob}/todo.md`, allPaths), null);
+    assert.equal(resolveWikilink('Ideas', `${alice}/todo.md`, allPaths), null);
+  });
+
+  it("prefers the owner's own note to a shared note of the same name", () => {
+    assert.equal(resolveWikilink('Roadmap', `${alice}/sub/todo.md`, allPaths), `${alice}/Roadmap.md`);
+    assert.equal(resolveWikilink('Roadmap', `${bob}/todo.md`, allPaths), 'Notes/Roadmap.md');
+    assert.equal(resolveWikilink('Notes/Roadmap', `${alice}/todo.md`, allPaths), 'Notes/Roadmap.md');
+  });
+});
+
+describe('canLinkTo', () => {
+  it('lets shared notes reach shared notes, personal notes their own and shared notes', () => {
+    assert.equal(canLinkTo('a.md', 'b/c.md'), true);
+    assert.equal(canLinkTo('a.md', '_users/alice@example.com/c.md'), false);
+    assert.equal(canLinkTo('_users/alice@example.com/a.md', '_users/alice@example.com/x/c.md'), true);
+    assert.equal(canLinkTo('_users/alice@example.com/a.md', 'c.md'), true);
+    assert.equal(canLinkTo('_users/alice@example.com/a.md', '_users/alice@example.com.evil/c.md'), false);
+    assert.equal(canLinkTo('_users/bob@example.com/a.md', '_users/alice@example.com/c.md'), false);
   });
 });
 
