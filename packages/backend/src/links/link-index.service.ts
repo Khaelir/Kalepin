@@ -589,6 +589,8 @@ export class LinkIndexService {
     const grants = await this.grantSet(userEmail);
     const visible = (p: string | null) =>
       !userEmail || p === null || isVisibleTo(p, userEmail) || grants.has(p);
+    // A note the viewer cannot see has no graph: its node would echo the path back.
+    if (centerPath && !visible(centerPath)) return { nodes: [], edges: [] };
     const allLinks = allLinksRaw.filter(
       (l) => visible(l.sourcePath) && visible(l.targetPath),
     );

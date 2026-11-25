@@ -14,7 +14,7 @@ interface FakeLinkRow {
   linkType: 'wikilink' | 'markdown';
 }
 
-function makeLinkIndexService(rows: FakeLinkRow[], allPaths: string[] = []) {
+function makeLinkIndexService(rows: FakeLinkRow[], allPaths: string[] = [], grantedToBob: string[] = []) {
   const linkRepo = {
     async find({ where }: any = {}) {
       if (!where) return rows;
@@ -32,11 +32,16 @@ function makeLinkIndexService(rows: FakeLinkRow[], allPaths: string[] = []) {
   };
   const storage = { async list() { return []; } } as any;
   const fileWatcher = { register: () => {}, on: () => {} } as any;
+  const visibility = {
+    async visibleGrantSet(email: string) { return new Set(email === BOB ? grantedToBob : []); },
+  };
   const svc = new LinkIndexService(
     linkRepo as any,
     storage,
     dataSource as any,
     fileWatcher,
+    undefined,
+    visibility as any,
   );
   // Inject the in-memory `allPaths` set the service uses for the no-centerPath branch.
   (svc as any).allPaths = new Set(allPaths);
@@ -156,5 +161,24 @@ describe('LinkIndexService — getGraphData', () => {
     assert.ok(!bobEdges.some((e) => e.includes('alice@example.com')), `Bob edges: ${bobEdges.join(', ')}`);
     assert.ok(bobNodes.includes('Notes/A.md'));
     assert.ok(bobNodes.includes('Notes/B.md'));
+  });
+
+  it("returns an empty graph centred on a note the viewer cannot see", async () => {
+    const secret = '_users/alice@example.com/secret.md';
+    const shared = '_users/alice@example.com/shared.md';
+    const rows: FakeLinkRow[] = [
+      { sourcePath: secret, targetPath: 'Notes/B.md', rawTarget: 'B', lineNumber: 1, context: null, linkType: 'wikilink' },
+      { sourcePath: shared, targetPath: 'Notes/B.md', rawTarget: 'B', lineNumber: 1, context: null, linkType: 'wikilink' },
+    ];
+    const svc = makeLinkIndexService(rows, ['Notes/B.md', secret, shared], [shared]);
+
+    assert.deepEqual(await svc.getGraphData(secret, 2, BOB), { nodes: [], edges: [] });
+
+    const aliceNodes = (await svc.getGraphData(secret, 1, ALICE)).nodes.map((n) => n.path).sort();
+    assert.deepEqual(aliceNodes, ['Notes/B.md', secret]);
+
+    // A note shared with Bob through a grant keeps its graph, minus what he cannot see.
+    const bobNodes = (await svc.getGraphData(shared, 2, BOB)).nodes.map((n) => n.path).sort();
+    assert.deepEqual(bobNodes, ['Notes/B.md', shared]);
   });
 });
