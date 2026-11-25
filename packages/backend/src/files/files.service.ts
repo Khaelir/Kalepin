@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger, Optional, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import { Injectable, Inject, Logger, Optional, NotFoundException, ConflictException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { EventEmitter } from 'events';
 import { createHash } from 'crypto';
 import { STORAGE_ADAPTER, StorageAdapter } from '../storage';
@@ -417,11 +417,27 @@ export class FilesService extends EventEmitter {
     this.moveHooks.push(hooks);
   }
 
+  /**
+   * Moving or renaming in a personal folder is its owner's call; a write
+   * grant covers the note's content. Otherwise a grantee could move the
+   * owner's note to the shared vault (its grant follows) and on into his own
+   * folder, taking her access with it. Runs after `assertWritable`, which
+   * already 404s what the caller cannot see. (A grantee may still delete: the
+   * note lands in the owner's trash, where only she can restore it.)
+   */
+  private assertOwnerForMove(filePath: string, userEmail: string): void {
+    if (isUnderPersonalRoot(filePath) && !isVisibleTo(filePath, userEmail)) {
+      throw new ForbiddenException('Only the owner can move or rename this note');
+    }
+  }
+
   async move(src: string, dest: string, userEmail?: string): Promise<void> {
     if (userEmail) {
       // Both ends gated; non-owner sees 404 for either side.
       await this.assertWritable(src, userEmail);
       await this.assertWritable(dest, userEmail);
+      this.assertOwnerForMove(src, userEmail);
+      this.assertOwnerForMove(dest, userEmail);
       if (isPersonalRootSegment(src)) {
         throw new BadRequestException('Personal folder cannot be renamed');
       }
