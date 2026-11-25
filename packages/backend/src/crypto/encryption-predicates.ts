@@ -75,3 +75,16 @@ export function isE2EPath(path: string): boolean {
   const tail = rest.slice(slashIdx + 1);
   return tail === '_secure' || tail.startsWith('_secure/');
 }
+
+/**
+ * `path` is inside a vault-reset tombstone, `_users/{email}/_secure.tombstone-{ts}/`:
+ * a `_secure/` folder renamed aside as-is, so its files are still wrapped by
+ * the user's master-KEK (see SecureVaultService.resetVault).
+ */
+export function isE2ETombstonePath(path: string): boolean {
+  if (!path.startsWith('_users/')) return false;
+  const rest = path.slice('_users/'.length);
+  const slashIdx = rest.indexOf('/');
+  if (slashIdx < 0) return false;
+  return rest.slice(slashIdx + 1).startsWith('_secure.tombstone-');
+}

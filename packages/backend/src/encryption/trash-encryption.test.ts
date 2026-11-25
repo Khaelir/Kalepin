@@ -59,15 +59,18 @@ async function isEnvelope(root: string, rel: string): Promise<boolean> {
 }
 
 describe('skipSweepEntry', () => {
-  it('walks only the zone trash folders among dot entries', () => {
+  it('walks only the zone trash folders and comment sidecars among dot entries', () => {
     assert.equal(skipSweepEntry('notes', true, '', 'shared'), false);
     assert.equal(skipSweepEntry('a.md', false, 'notes', 'shared'), false);
     assert.equal(skipSweepEntry('.trash', true, '', 'shared'), false);
     assert.equal(skipSweepEntry('.trash', true, 'alice@x.com', 'personal'), false);
+    assert.equal(skipSweepEntry('.a.md.collab', false, 'notes', 'shared'), false);
+    assert.equal(skipSweepEntry('.a.md.collab', false, 'alice@x.com/.trash/abc', 'personal'), false);
     // Everything else that starts with a dot stays skipped.
     assert.equal(skipSweepEntry('.deleted', true, '', 'personal'), true);
     assert.equal(skipSweepEntry('.obsidian', true, '', 'shared'), true);
-    assert.equal(skipSweepEntry('.a.md.collab', false, 'notes', 'shared'), true);
+    assert.equal(skipSweepEntry('.a.md.collab', true, 'notes', 'shared'), true);
+    assert.equal(skipSweepEntry('.a.md.collab.tmp.0a1b2c', false, 'notes', 'shared'), true);
     assert.equal(skipSweepEntry('.trash', false, '', 'shared'), true);
     assert.equal(skipSweepEntry('.trash', true, '_attachments', 'shared'), true);
     assert.equal(skipSweepEntry('.trash', true, 'notes', 'shared'), true);

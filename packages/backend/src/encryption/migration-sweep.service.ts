@@ -331,10 +331,11 @@ export class MigrationSweepService implements OnApplicationBootstrap {
   }
 
   /**
-   * Walk the physical root yielding relative file paths. Skips dotfiles,
-   * `.deleted/`, the reserved `_users/` segment at the root of the shared
-   * vault, and `.tmp.*` leftovers. The zone trash folder is walked: trashed
-   * notes are restorable and must follow the zone's encryption state.
+   * Walk the physical root yielding relative file paths. Skips dotfiles
+   * other than comment sidecars, `.deleted/`, the reserved `_users/` segment
+   * at the root of the shared vault, and `.tmp.*` leftovers. The zone trash
+   * folder is walked: trashed notes are restorable and must follow the zone's
+   * encryption state.
    */
   private async *walk(
     root: string,

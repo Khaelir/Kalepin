@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import * as crypto from 'crypto';
 import { FileEntry, FileChangeEvent } from '@kalepin/shared';
 import { StorageAdapter } from './storage-adapter.interface';
 import {
@@ -166,13 +167,24 @@ export class EncryptingStorageAdapter implements StorageAdapter {
     // envelope binds the file's path, so a raw fs-level rename would leave
     // descendants undecryptable. Read (auto-decrypt) and re-write (auto-encrypt
     // for the new zone+path) for each file. Directories are walked.
+    //
+    // A case-only rename names the same entry twice on a case-insensitive
+    // filesystem: writing `dest` would overwrite `src` and deleting `src`
+    // afterwards would delete the note (or `rm -r` the folder). Rename the
+    // entry aside first and re-encrypt from there; the envelopes stay bound to
+    // `src` until rewritten.
+    let from = src;
+    if (src !== dest && src.toLowerCase() === dest.toLowerCase()) {
+      from = asidePathOf(src);
+      await this.inner.move(src, from);
+    }
     try {
-      const buf = await this.readBytes(src);
+      const buf = await this.readBytesBoundTo(from, src);
       await this.writeBytes(dest, buf);
-      await this.inner.delete(src);
+      await this.inner.delete(from);
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException)?.code === 'EISDIR') {
-        await this.moveDirectoryReencrypt(src, dest);
+        await this.moveDirectoryReencrypt(from, dest, src);
         return;
       }
       throw err;
@@ -183,24 +195,35 @@ export class EncryptingStorageAdapter implements StorageAdapter {
    * Walks `src`, re-encrypting each file at `dest` (rebinding AAD), then
    * deletes `src`. `list` skips dot entries, so each file's comment sidecar
    * (`.<name>.collab`) is carried explicitly; other dot entries are dropped.
+   * `boundTo` is the path the envelopes under `src` are bound to.
    */
-  private async moveDirectoryReencrypt(src: string, dest: string): Promise<void> {
+  private async moveDirectoryReencrypt(src: string, dest: string, boundTo = src): Promise<void> {
     const entries = await this.inner.list(src);
     for (const e of entries) {
+      const rel = e.path.slice(src.length);
       const childSrc = e.path;
-      const childDest = dest + e.path.slice(src.length);
+      const childDest = dest + rel;
       if (e.type === 'directory') {
-        await this.moveDirectoryReencrypt(childSrc, childDest);
+        await this.moveDirectoryReencrypt(childSrc, childDest, boundTo + rel);
       } else {
-        const buf = await this.readBytes(childSrc);
+        const buf = await this.readBytesBoundTo(childSrc, boundTo + rel);
         await this.writeBytes(childDest, buf);
         const sidecar = sidecarPathOf(childSrc);
         if (await this.inner.exists(sidecar)) {
-          await this.writeBytes(sidecarPathOf(childDest), await this.readBytes(sidecar));
+          const sidecarBuf = await this.readBytesBoundTo(sidecar, sidecarPathOf(boundTo + rel));
+          await this.writeBytes(sidecarPathOf(childDest), sidecarBuf);
         }
       }
     }
     await this.inner.delete(src);
+  }
+
+  /** `readBytes` for bytes stored at `location` but bound (AAD) to `boundTo`. */
+  private async readBytesBoundTo(location: string, boundTo: string): Promise<Buffer> {
+    if (location === boundTo) return this.readBytes(location);
+    const raw = await this.inner.readBytes!(location);
+    if (!hasEnvelopeMagic(raw)) return raw;
+    return decrypt(raw, boundTo, this.kek);
   }
 
   async list(virtualPath: string): Promise<FileEntry[]> {
@@ -246,4 +269,15 @@ function sidecarPathOf(virtualPath: string): string {
   const slash = virtualPath.lastIndexOf('/');
   const dir = slash < 0 ? '' : virtualPath.slice(0, slash + 1);
   return `${dir}.${virtualPath.slice(slash + 1)}.collab`;
+}
+
+/**
+ * A hidden sibling name to park an entry under during a case-only rename.
+ * Dot entries are ignored by the file watcher and the encryption sweep.
+ */
+function asidePathOf(virtualPath: string): string {
+  const slash = virtualPath.lastIndexOf('/');
+  const dir = slash < 0 ? '' : virtualPath.slice(0, slash + 1);
+  const suffix = crypto.randomBytes(6).toString('hex');
+  return `${dir}.${virtualPath.slice(slash + 1)}.rename-${suffix}`;
 }

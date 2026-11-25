@@ -183,16 +183,25 @@ A standard restore loop:
 
 ### KEK rotation
 
-Rotate the KEK on a schedule (e.g., yearly) or after suspected compromise:
+Rotate the KEK on a schedule (e.g., yearly) or after suspected compromise. **Stop the server first.** It loads the KEK once at boot, so while it runs it cannot read notes rotated under it, and its saves race the rotation. The CLI refuses to start while the server's heartbeat file (`kalepin-server.heartbeat`, next to `DB_PATH`) is less than a minute old.
 
-```sh
-# Inside the running container.
-node dist/cli/rotate-kek.js --new-kek-file=/run/secrets/kalepin.kek.new
-```
+1. Generate the new KEK (see [Generating the KEK](#generating-the-kek)) and back it up.
+2. Stop the server, e.g. `docker compose stop kalepin`.
+3. Run the rotation with the server's environment (`KALEPIN_KEK_FILE` pointing at the current KEK, `VAULT_PATH`, `PERSONAL_PATH`, `DB_PATH`) and data. With Docker Compose, a one-off container does that; the new KEK file must be readable by the container user (uid 1000) with mode `0400` or `0600`:
 
-The rotation walks every encrypted file, unwraps the CEK with the old KEK source, re-wraps it with the new one, and rewrites the envelope. Bulk ciphertext bytes never change — only the small wrapped-CEK header. Expected duration on a 10K-file vault: under a minute on a typical SSD. After completion, swap the symlink and destroy the old KEK.
+   ```sh
+   docker compose run --rm \
+     -v "$PWD/secrets/kalepin.kek.new:/run/secrets/kalepin.kek.new:ro" \
+     kalepin node packages/backend/dist/backend/src/cli/rotate-kek.js \
+     --new-kek-file=/run/secrets/kalepin.kek.new
+   ```
 
-The rotation reuses the migration sweep state machine, so it is crash-safe and resumable.
+4. Make the new KEK the configured one (replace `secrets/kalepin.kek`, or repoint `KALEPIN_KEK_FILE`), then start the server.
+5. Once notes open normally, destroy the old KEK.
+
+The rotation walks every server-encrypted file (notes, attachments, comment sidecars and the trash), unwraps the CEK with the old KEK, re-wraps it with the new one, and rewrites the envelope. Bulk ciphertext bytes never change — only the small wrapped-CEK header. End-to-end encrypted files (`_users/{email}/_secure/` and vault-reset tombstones) are wrapped by their owner's key and left as they are. Expected duration on a 10K-file vault: under a minute on a typical SSD.
+
+Each file is rewritten atomically and files already on the new KEK are skipped, so an interrupted rotation resumes when you run the same command again. Do not start the server until it completes.
 
 ### End-to-end encryption (`_users/{email}/_secure/`)
 

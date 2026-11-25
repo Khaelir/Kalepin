@@ -1,9 +1,11 @@
-import { Injectable, BadRequestException, NotFoundException, Optional } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, Optional, Inject, Logger } from '@nestjs/common';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { assertReadableBy, isUnderPersonalRoot, personalRootFor } from '../auth/visibility';
+import { assertReadableBy, isUnderPersonalRoot, personalRootFor, PERSONAL_PREFIX } from '../auth/visibility';
 import { GrantAwareVisibility } from '../auth/grant-aware-visibility.service';
+import { STORAGE_ADAPTER, StorageAdapter } from '../storage/storage-adapter.interface';
+import { ENVELOPE_MAGIC } from '../crypto/envelope';
 
 const ALLOWED_MIMES = new Set([
   'image/png',
@@ -12,6 +14,8 @@ const ALLOWED_MIMES = new Set([
   'image/webp',
   'image/svg+xml',
 ]);
+
+const ENVELOPE_MAGIC_TEXT = ENVELOPE_MAGIC.toString('latin1');
 
 const MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
@@ -24,11 +28,17 @@ const MIME_BY_EXT: Record<string, string> = {
 
 @Injectable()
 export class AttachmentsService {
+  private readonly logger = new Logger('AttachmentsService');
   private readonly vaultPath: string;
   private readonly personalPath: string | undefined;
   private readonly sharedAttachmentsDir: string;
 
-  constructor(@Optional() private readonly visibility?: GrantAwareVisibility) {
+  constructor(
+    @Optional() private readonly visibility?: GrantAwareVisibility,
+    // Notes are read through the storage adapter so encrypted ones are
+    // scanned as plaintext by the orphan cleanup.
+    @Optional() @Inject(STORAGE_ADAPTER) private readonly storage?: StorageAdapter,
+  ) {
     this.vaultPath = process.env.VAULT_PATH || './data/vault';
     this.personalPath = process.env.PERSONAL_PATH || undefined;
     this.sharedAttachmentsDir = path.join(this.vaultPath, '_attachments');
@@ -230,6 +240,7 @@ export class AttachmentsService {
       kind: 'shared',
       attachmentsDir: this.sharedAttachmentsDir,
       docsRoot: this.vaultPath,
+      virtualRoot: '',
     });
     orphansFound += sharedResult.orphansFound;
     movedToTrash += sharedResult.movedToTrash;
@@ -249,6 +260,7 @@ export class AttachmentsService {
           kind: 'personal',
           attachmentsDir: path.join(userRoot, '_attachments'),
           docsRoot: userRoot,
+          virtualRoot: `${PERSONAL_PREFIX}${userDir}`,
         });
         orphansFound += result.orphansFound;
         movedToTrash += result.movedToTrash;
@@ -263,6 +275,8 @@ export class AttachmentsService {
     kind: 'shared' | 'personal';
     attachmentsDir: string;
     docsRoot: string;
+    /** Virtual path of `docsRoot` ('' for the shared vault, `_users/{email}`). */
+    virtualRoot: string;
   }): Promise<{ orphansFound: number; movedToTrash: number; purgedFromTrash: number }> {
     try {
       await fs.access(opts.attachmentsDir);
@@ -271,11 +285,20 @@ export class AttachmentsService {
     }
 
     const referenced = new Set<string>();
-    await this.scanReferences(opts.docsRoot, referenced);
+    const unreadable = await this.scanReferences(opts.docsRoot, opts.virtualRoot, referenced);
+    // A note we cannot read (end-to-end encrypted `_secure/`, a vault-reset
+    // tombstone, an envelope this KEK cannot open) may reference any
+    // attachment here, so nothing is trashed or purged in this namespace.
+    const complete = unreadable.length === 0;
+    if (!complete) {
+      this.logger.warn(
+        `attachment cleanup: nothing trashed in ${opts.attachmentsDir}, ${unreadable.length} note(s) unreadable (e.g. ${unreadable[0]})`,
+      );
+    }
 
     const entries = await fs.readdir(opts.attachmentsDir);
     const actualFiles = entries.filter((e) => !e.startsWith('.'));
-    const orphans = actualFiles.filter((f) => !referenced.has(f));
+    const orphans = complete ? actualFiles.filter((f) => !referenced.has(f)) : [];
 
     const trashDir = path.join(opts.attachmentsDir, '.trash');
     if (orphans.length > 0) {
@@ -296,12 +319,21 @@ export class AttachmentsService {
       const trashEntries = await fs.readdir(trashDir);
       const now = Date.now();
       const sevenDays = 7 * 24 * 60 * 60 * 1000;
+      const live = new Set(actualFiles.filter((f) => referenced.has(f)));
 
       for (const entry of trashEntries) {
         const match = entry.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)_/);
         if (match) {
+          const name = entry.slice(match[0].length);
+          if (referenced.has(name) && !live.has(name)) {
+            // Referenced again, or trashed by a run that could not read the
+            // notes (encrypted zones): put it back instead of purging it.
+            await fs.rename(path.join(trashDir, entry), path.join(opts.attachmentsDir, name));
+            live.add(name);
+            continue;
+          }
           const trashedAt = new Date(match[1]).getTime();
-          if (now - trashedAt > sevenDays) {
+          if (complete && now - trashedAt > sevenDays) {
             await fs.unlink(path.join(trashDir, entry));
             purgedFromTrash++;
           }
@@ -318,25 +350,47 @@ export class AttachmentsService {
     };
   }
 
+  /**
+   * Adds the `_attachments/` names referenced by the notes under `dir`
+   * (virtual path `virtualDir`) to `referenced`, and returns the notes and
+   * folders it could not read as plaintext.
+   */
   private async scanReferences(
     dir: string,
+    virtualDir: string,
     referenced: Set<string>,
-  ): Promise<void> {
+    unreadable: string[] = [],
+  ): Promise<string[]> {
     let entries: import('fs').Dirent[];
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
-      return;
+      unreadable.push(virtualDir || '/');
+      return unreadable;
     }
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
+      const virtualPath = virtualDir ? `${virtualDir}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
         if (entry.name === '_attachments' || entry.name === 'node_modules') {
           continue;
         }
-        await this.scanReferences(fullPath, referenced);
+        await this.scanReferences(fullPath, virtualPath, referenced, unreadable);
       } else if (entry.name.endsWith('.md')) {
-        const content = await fs.readFile(fullPath, 'utf-8');
+        let content: string;
+        try {
+          content = this.storage
+            ? await this.storage.read(virtualPath)
+            : await fs.readFile(fullPath, 'utf-8');
+        } catch {
+          unreadable.push(virtualPath);
+          continue;
+        }
+        // Still an envelope: end-to-end encrypted, or nothing to decrypt it.
+        if (content.startsWith(ENVELOPE_MAGIC_TEXT)) {
+          unreadable.push(virtualPath);
+          continue;
+        }
         const regex = /_attachments\/([^\s)]+)/g;
         let match: RegExpExecArray | null;
         while ((match = regex.exec(content)) !== null) {
@@ -344,6 +398,7 @@ export class AttachmentsService {
         }
       }
     }
+    return unreadable;
   }
 
   private shouldRouteToPersonal(docPath: string | undefined, userEmail: string | undefined): boolean {

@@ -1,7 +1,10 @@
 /**
  * KEK rotation CLI.
  *
- *   node dist/cli/rotate-kek.js --new-kek-file=/run/secrets/kalepin.kek.new
+ *   node packages/backend/dist/backend/src/cli/rotate-kek.js --new-kek-file=/run/secrets/kalepin.kek.new
+ *
+ * Run it with the server stopped (it refuses while the server's heartbeat is
+ * fresh): the server holds the old KEK in memory.
  *
  * Walks every encrypted file in both zones (personal + shared), unwraps the
  * CEK with the old KEK source (KALEPIN_KEK_FILE) and re-wraps it with the new
@@ -17,7 +20,7 @@ import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import Database from 'better-sqlite3';
+import * as Database from 'better-sqlite3';
 import {
   FileKEKSource,
   KEKSource,
@@ -29,6 +32,13 @@ import {
   WrongKEKError,
 } from '../crypto/envelope';
 import { skipSweepEntry } from '../encryption/sweep-entry-filter';
+import { isE2EPath, isE2ETombstonePath } from '../crypto/encryption-predicates';
+import { PERSONAL_PREFIX } from '../auth/visibility';
+import {
+  HEARTBEAT_STALE_MS,
+  readLiveServerHeartbeat,
+  serverHeartbeatPath,
+} from '../storage/server-heartbeat';
 
 interface Args {
   newKekFile: string;
@@ -57,6 +67,10 @@ function printHelp(): void {
       '',
       'Required env: KALEPIN_KEK_FILE points to the current KEK.',
       '',
+      'Stop the Kalepin server first: it keeps the current KEK in memory. The',
+      'rotation refuses to start while the server heartbeat next to DB_PATH is',
+      'fresh.',
+      '',
       'Walks every encrypted file in VAULT_PATH and PERSONAL_PATH and re-wraps the',
       'CEK with the new KEK. Bulk ciphertext bytes are unchanged. Idempotent and',
       'crash-safe: re-running resumes by skipping files already wrapped by the new',
@@ -77,7 +91,7 @@ async function* walk(root: string, zone: 'personal' | 'shared'): AsyncGenerator<
       continue;
     }
     for (const entry of entries) {
-      // Dot entries are skipped, except the zone trash (restorable notes).
+      // Dot entries are skipped, except comment sidecars and the zone trash.
       if (skipSweepEntry(entry.name, entry.isDirectory(), rel, zone)) continue;
       if (entry.name.includes('.tmp.')) continue;
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
@@ -102,7 +116,7 @@ async function atomicWrite(absPath: string, content: Buffer): Promise<void> {
   await fsp.rename(tmp, absPath);
 }
 
-interface ZoneRoot {
+export interface ZoneRoot {
   zone: 'personal' | 'shared';
   root: string;
   /** Skip the reserved `_users/` segment under the shared root. */
@@ -122,18 +136,26 @@ function resolveZoneRoots(): ZoneRoot[] {
   return roots;
 }
 
-async function rotateRoot(
+export async function rotateRoot(
   zr: ZoneRoot,
   oldKek: KEKSource,
   newKek: KEKSource,
-): Promise<{ rewrapped: number; skipped: number; passthrough: number }> {
+): Promise<{ rewrapped: number; skipped: number; passthrough: number; endToEnd: number }> {
   let rewrapped = 0;
   let skipped = 0;
   let passthrough = 0;
+  let endToEnd = 0;
 
   for await (const rel of walk(zr.root, zr.zone)) {
     if (zr.skipUsersAtRoot && rel.startsWith('_users/')) continue;
     if (zr.skipUsersAtRoot && rel === '_users') continue;
+    // `_secure/` and vault-reset tombstones are wrapped by the user's
+    // master-KEK, which the server never holds: nothing to rotate.
+    const virtualPath = zr.zone === 'personal' ? `${PERSONAL_PREFIX}${rel}` : rel;
+    if (isE2EPath(virtualPath) || isE2ETombstonePath(virtualPath)) {
+      endToEnd++;
+      continue;
+    }
     const abs = path.join(zr.root, rel);
 
     let raw: Buffer;
@@ -176,14 +198,15 @@ async function rotateRoot(
     }
   }
 
-  return { rewrapped, skipped, passthrough };
+  return { rewrapped, skipped, passthrough, endToEnd };
 }
 
-function updateZoneFingerprints(dbPath: string, newFp: Buffer): void {
+export function updateZoneFingerprints(dbPath: string, newFp: Buffer): void {
   const db = new Database(dbPath);
   try {
+    // Column names follow the TypeORM entity (EncryptionZone): camelCase.
     const stmt = db.prepare(
-      "UPDATE encryption_zones SET kek_fingerprint = ?, updated_at = ? WHERE enabled = 1",
+      'UPDATE encryption_zones SET "kekFingerprint" = ?, "updatedAt" = ? WHERE enabled = 1',
     );
     stmt.run(newFp, Date.now());
   } finally {
@@ -215,6 +238,23 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
+  // The server unwraps with the KEK it loaded at boot: notes rotated under it
+  // become unreadable to it, and its saves race the rewrap.
+  const heartbeatFile = serverHeartbeatPath();
+  const live = readLiveServerHeartbeat(heartbeatFile);
+  if (live) {
+    const age = Math.max(0, Math.round((Date.now() - live.heartbeatAt) / 1000));
+    console.error(
+      [
+        `error: the Kalepin server is running (heartbeat ${age}s ago in ${heartbeatFile}` +
+          `${live.pid ? `, pid ${live.pid}` : ''}${live.host ? ` on ${live.host}` : ''}).`,
+        'Stop it, rotate, then start it with the new KEK.',
+        `If it is already stopped, retry in ${Math.max(1, HEARTBEAT_STALE_MS / 1000 - age)}s or delete that file.`,
+      ].join('\n'),
+    );
+    process.exit(2);
+  }
+
   const oldKek = new FileKEKSource(oldKekPath);
   const newKek = loadFreshKekFile(args.newKekFile);
 
@@ -240,7 +280,7 @@ async function main(): Promise<void> {
     console.log(`[rotate-kek] walking zone=${zr.zone} root=${zr.root}`);
     const stats = await rotateRoot(zr, oldKek, newKek);
     console.log(
-      `[rotate-kek] zone=${zr.zone} rewrapped=${stats.rewrapped} skipped=${stats.skipped} passthrough=${stats.passthrough}`,
+      `[rotate-kek] zone=${zr.zone} rewrapped=${stats.rewrapped} skipped=${stats.skipped} passthrough=${stats.passthrough} end-to-end=${stats.endToEnd}`,
     );
     totalRewrapped += stats.rewrapped;
     totalSkipped += stats.skipped;
@@ -262,7 +302,9 @@ async function main(): Promise<void> {
   );
 }
 
-main().catch((err) => {
-  console.error(`[rotate-kek] fatal: ${(err as Error).message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`[rotate-kek] fatal: ${(err as Error).message}`);
+    process.exit(1);
+  });
+}
