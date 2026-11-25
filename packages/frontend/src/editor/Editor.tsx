@@ -47,6 +47,7 @@ import { DrawioEditorController } from './drawio-editor-controller';
 import { DocHeader } from './DocHeader';
 import { flattenFiles } from './extensions/wikilink-utils';
 import { wikilinkTargetFor } from '../components/related-notes';
+import { splitFrontmatterBlock } from '../utils/frontmatter';
 
 // The built-in Link extension registers a clickHandler plugin that calls
 // window.open(link.href, link.target) during the mouseup event. Even with
@@ -65,10 +66,12 @@ const Link = LinkBase.extend({
 
 type EditorMode = 'rendered' | 'raw';
 
-/** Apply a remote markdown update using a surgical PM transaction instead of setContent(). */
+/**
+ * Apply a remote markdown update using a surgical PM transaction instead of setContent().
+ * `newMd` is the note body: the frontmatter block never goes into TipTap.
+ */
 function applyRemoteMarkdown(
   editor: ReturnType<typeof useEditor>,
-  shadowRef: React.MutableRefObject<string>,
   newMd: string,
   isRemoteRef: React.MutableRefObject<boolean>,
 ) {
@@ -84,7 +87,6 @@ function applyRemoteMarkdown(
     isRemoteRef.current = true;
     editor.commands.setContent(newMd);
     isRemoteRef.current = false;
-    shadowRef.current = newMd;
     return;
   }
 
@@ -144,8 +146,6 @@ function applyRemoteMarkdown(
     editor.view.dispatch(tr);
     isRemoteRef.current = false;
   }
-
-  shadowRef.current = newMd;
 }
 
 /** Generate a URL-friendly slug from heading text (standard markdown anchor rules). */
@@ -475,6 +475,11 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
 
   // Shadow markdown — mirrors what the server has
   const shadowRef = useRef<string>(initialContent);
+  // The note's frontmatter block stays out of TipTap (markdown-it would read
+  // its fences as horizontal rules) and is put back wherever the editor's doc
+  // turns into markdown. The state copy feeds the DocHeader pills.
+  const frontmatterRef = useRef(splitFrontmatterBlock(initialContent).frontmatter);
+  const [frontmatter, setFrontmatter] = useState(frontmatterRef.current);
 
   // Save status state machine
   const { status: saveStatus, markDirty, markAcked, resetToSynced } = useSaveStatus(wsClient, docId);
@@ -681,7 +686,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       CommentHighlights,
       TableOfContents,
     ],
-    content: initialContent,
+    content: splitFrontmatterBlock(initialContent).body,
     immediatelyRender: false,
     onCreate({ editor }) {
       // Initialize shadow to the original server content (not getMarkdown(),
@@ -695,7 +700,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       if (isRemoteRef.current) return;
       if (!transaction.docChanged) return;
 
-      const newMd = (editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText();
+      const newMd = frontmatterRef.current + ((editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText());
       const ops = diffMarkdownToOps(shadowRef.current, newMd);
       shadowRef.current = newMd;
 
@@ -801,8 +806,9 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       }
       // Parse markdown → HTML → PM doc, then replace editor content via transaction
       const mdParser = (editor.storage as any).markdown?.parser;
-      if (mdParser && previewContent) {
-        const html = mdParser.parse(previewContent);
+      const previewBody = splitFrontmatterBlock(previewContent).body;
+      if (mdParser && previewBody) {
+        const html = mdParser.parse(previewBody);
         const wrapper = document.createElement('div');
         wrapper.innerHTML = html;
         const newDoc = PMDOMParser.fromSchema(editor.schema).parse(wrapper);
@@ -812,7 +818,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
         isRemoteRef.current = false;
       } else {
         isRemoteRef.current = true;
-        editor.commands.setContent(previewContent || '<p></p>');
+        editor.commands.setContent(previewBody || '<p></p>');
         isRemoteRef.current = false;
       }
       editor.setEditable(false);
@@ -1105,6 +1111,16 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
     }
   }, [slashMenu?.active, slashMenu?.position?.top, slashMenu?.position?.left, slashMenu?.submenu]);
 
+  // The server's text changed under the editor (remote op, rejected op,
+  // re-sync): track the whole note in the shadow, show its body in TipTap.
+  const applyServerText = (md: string) => {
+    shadowRef.current = md;
+    const parts = splitFrontmatterBlock(md);
+    frontmatterRef.current = parts.frontmatter;
+    setFrontmatter(parts.frontmatter);
+    if (editor) applyRemoteMarkdown(editor, parts.body, isRemoteRef);
+  };
+
   useEffect(() => {
     if (!editor) return;
 
@@ -1117,8 +1133,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
           remoteOpsQueueRef.current.push(ops);
           return;
         }
-        const newMd = applyOpsToMarkdown(shadowRef.current, ops);
-        applyRemoteMarkdown(editor, shadowRef, newMd, isRemoteRef);
+        applyServerText(applyOpsToMarkdown(shadowRef.current, ops));
       },
       {
         initialShadow: initialContent,
@@ -1126,8 +1141,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
           // Reset optimistic shadow to confirmed shadow
           const confirmed = otClient.getConfirmedShadow();
           if (confirmed) {
-            shadowRef.current = confirmed;
-            applyRemoteMarkdown(editor, shadowRef, confirmed, isRemoteRef);
+            applyServerText(confirmed);
           }
         },
       },
@@ -1181,16 +1195,14 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
             remoteOpsQueueRef.current.push(ops);
             return;
           }
-          const newMd = applyOpsToMarkdown(shadowRef.current, ops);
-          applyRemoteMarkdown(editor, shadowRef, newMd, isRemoteRef);
+          applyServerText(applyOpsToMarkdown(shadowRef.current, ops));
         },
         {
           initialShadow: msg.content,
           onError: () => {
             const confirmed = otClient.getConfirmedShadow();
             if (confirmed) {
-              shadowRef.current = confirmed;
-              applyRemoteMarkdown(editor, shadowRef, confirmed, isRemoteRef);
+              applyServerText(confirmed);
             }
           },
         },
@@ -1198,8 +1210,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
       otClientRef.current = otClient;
 
       // Replace editor content with server state
-      shadowRef.current = msg.content;
-      applyRemoteMarkdown(editor, shadowRef, msg.content, isRemoteRef);
+      applyServerText(msg.content);
 
       // Restore editable and reset save status (comment-only stays locked).
       // Read permission from the payload — the server re-sends it on every
@@ -1286,8 +1297,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
         remoteOpsQueueRef.current.push(ops);
         return;
       }
-      const newMd = applyOpsToMarkdown(shadowRef.current, ops);
-      applyRemoteMarkdown(editor, shadowRef, newMd, isRemoteRef);
+      applyServerText(applyOpsToMarkdown(shadowRef.current, ops));
     });
   }, [mode, editor]);
 
@@ -1300,7 +1310,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
     }
 
     // Use the shadow (which is markdown) for raw editing
-    const md = (editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText();
+    const md = frontmatterRef.current + ((editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText());
     shadowRef.current = md;
     setRawContent(md);
     setMode('raw');
@@ -1324,8 +1334,11 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
     }
 
     // Update editor to final state
+    const parts = splitFrontmatterBlock(shadowRef.current);
+    frontmatterRef.current = parts.frontmatter;
+    setFrontmatter(parts.frontmatter);
     isRemoteRef.current = true;
-    editor.commands.setContent(shadowRef.current);
+    editor.commands.setContent(parts.body);
     isRemoteRef.current = false;
 
     setMode('rendered');
@@ -1344,7 +1357,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
   // Copy editor content as markdown (for error banner button)
   const handleCopyContent = useCallback(() => {
     if (!editor) return;
-    const md = (editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText();
+    const md = frontmatterRef.current + ((editor.storage as any).markdown?.getMarkdown?.() ?? editor.getText());
     navigator.clipboard.writeText(md);
   }, [editor]);
 
@@ -1515,7 +1528,7 @@ export const KalepinEditor = forwardRef<EditorHandle, EditorProps>(function Kale
                 updatedAt={updatedAt}
                 wordCount={wordCount}
                 backlinkCount={backlinkCount}
-                content={editor ? (editor.storage as any).markdown?.getMarkdown?.() ?? initialContent : initialContent}
+                content={frontmatter}
                 presenceUsers={presenceUsers}
                 onRename={onRename}
                 onRenameError={onRenameError}

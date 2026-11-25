@@ -39,6 +39,36 @@ function frontmatterLines(content: string): string[] | null {
   return null;
 }
 
+/**
+ * Split a note into its leading frontmatter block and the markdown body, with
+ * `frontmatter + body === content`. The block runs from the start (BOM
+ * included) through the closing fence and the blank lines after it, exactly
+ * as written; it is '' when the note has no (closed) frontmatter. Same
+ * detection rules as `frontmatterLines`. The editor keeps the block out of
+ * TipTap, where markdown-it would read the fences as horizontal rules.
+ */
+export function splitFrontmatterBlock(content: string): { frontmatter: string; body: string } {
+  const none = { frontmatter: '', body: content };
+  let start = content.startsWith('﻿') ? 1 : 0;
+  for (let i = 0; start <= content.length; i++) {
+    const nl = content.indexOf('\n', start);
+    const line = content.slice(start, nl === -1 ? content.length : nl).trimEnd();
+    if (i === 0 && line !== '---') return none;
+    if (i > 0 && (line === '---' || line === '...')) {
+      if (nl === -1) return { frontmatter: content, body: '' };
+      let end = nl + 1;
+      for (let next = content.indexOf('\n', end); next !== -1; next = content.indexOf('\n', end)) {
+        if (content.slice(end, next).trim() !== '') break;
+        end = next + 1;
+      }
+      return { frontmatter: content.slice(0, end), body: content.slice(end) };
+    }
+    if (nl === -1) return none;
+    start = nl + 1;
+  }
+  return none;
+}
+
 function stripYamlComment(s: string): string {
   return s.replace(/(^|\s)#(\s.*)?$/, '');
 }
