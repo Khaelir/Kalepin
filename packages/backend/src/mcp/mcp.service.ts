@@ -1118,7 +1118,7 @@ export class McpService implements OnModuleDestroy, OnModuleInit {
     server.registerTool(
       'move_note',
       {
-        description: 'Move or rename a note, like dragging it to another folder in the Kalepin UI. Its stable id and /doc/<id> URL stay the same, links to it in other notes are rewritten, and its comments, share links and grants follow it. Fails if a note already exists at the destination. Moving a note out of your personal folder makes it visible to everyone who can see the destination folder. Notes cannot be moved into or out of the encrypted folder (_secure/) here.',
+        description: 'Move or rename a note, like dragging it to another folder in the Kalepin UI. Its stable id and /doc/<id> URL stay the same, links to it in other notes are rewritten, and its comments follow it. Its share links and grants follow it too, except on a move between the shared vault and a personal folder, which revokes them. Fails if a note already exists at the destination. Moving a note out of your personal folder makes it visible to everyone who can see the destination folder. Notes cannot be moved into or out of the encrypted folder (_secure/) here.',
         inputSchema: {
           path: z.string().optional().describe('Current path of the note (e.g. "inbox/idea.md")'),
           id: z.string().optional().describe(NOTE_ID_DESCRIPTION),

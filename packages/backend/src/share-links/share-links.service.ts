@@ -188,6 +188,17 @@ export class ShareLinksService {
       .execute();
   }
 
+  /** Revoke every link on `path` or under `path/` (a folder). */
+  async revokeAtOrUnder(path: string): Promise<void> {
+    await this.repo
+      .createQueryBuilder()
+      .update()
+      .set({ revokedAt: Date.now() })
+      .where('(path = :path OR substr(path, 1, length(:prefix)) = :prefix)', { path, prefix: `${path}/` })
+      .andWhere('revokedAt IS NULL')
+      .execute();
+  }
+
   /** Look up the most relevant share-link row for a path (active first, then
    * the most recent revoked/expired row). Returns null when no row exists. */
   async findByPath(path: string): Promise<ShareLinkInfo | null> {

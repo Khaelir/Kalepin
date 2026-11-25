@@ -26,8 +26,16 @@ import {
   EncryptionPredicates,
 } from '../crypto/encryption-predicates';
 import { canonicalizeEmail } from '../auth/email';
+import { personalRootFor } from '../auth/visibility';
+import { STORAGE_ADAPTER, StorageAdapter } from '../storage';
 import { NotificationInboxService } from '../notifications/notification-inbox.service';
 import { NotificationService } from '../comments/notification.service';
+
+/** A personal folder's owner manages every grant on her notes, including
+ *  ones another user minted before the note moved into her folder. */
+function ownsPersonalPath(path: string, email: string): boolean {
+  return path.startsWith(personalRootFor(email) + '/');
+}
 
 interface MintBody {
   grantee_email: string;
@@ -48,6 +56,8 @@ export class GrantsController {
     private readonly predicates: EncryptionPredicates,
     @Optional() private readonly inbox?: NotificationInboxService,
     @Optional() private readonly notifications?: NotificationService,
+    // Always provided by the global StorageModule; optional for unit tests.
+    @Optional() @Inject(STORAGE_ADAPTER) private readonly storage?: StorageAdapter,
   ) {}
 
   @Post()
@@ -77,6 +87,11 @@ export class GrantsController {
     const v = await this.visibility.visibilityFor(body.path, grantorEmail);
     if (v.kind !== 'owner') {
       throw new ForbiddenException('Only the path owner can mint grants');
+    }
+    // A grant on a path that does not exist yet would open whatever note is
+    // later created or moved there.
+    if (this.storage && !(await this.storage.exists(body.path))) {
+      throw new NotFoundException('File not found');
     }
 
     // Only a grant that gives the grantee new access is "shared with you";
@@ -130,8 +145,12 @@ export class GrantsController {
       throw new NotFoundException('grant not found');
     }
     const requester = canonicalizeEmail(req.user.email);
-    if (canonicalizeEmail(grant.grantorEmail) !== requester && !isAdmin(req.user.email)) {
-      throw new ForbiddenException('Only the grantor or an admin can update');
+    if (
+      canonicalizeEmail(grant.grantorEmail) !== requester &&
+      !isAdmin(req.user.email) &&
+      !ownsPersonalPath(grant.path, requester)
+    ) {
+      throw new ForbiddenException('Only the grantor, the note owner or an admin can update');
     }
     const updated = await this.grants.update(id, {
       permission: body.permission,
@@ -162,8 +181,8 @@ export class GrantsController {
     }
     const requester = canonicalizeEmail(req.user.email);
     const isGrantor = canonicalizeEmail(grant.grantorEmail) === requester;
-    if (!isGrantor && !isAdmin(req.user.email)) {
-      throw new ForbiddenException('Only the grantor or an admin can revoke');
+    if (!isGrantor && !isAdmin(req.user.email) && !ownsPersonalPath(grant.path, requester)) {
+      throw new ForbiddenException('Only the grantor, the note owner or an admin can revoke');
     }
     await this.grants.revoke(id);
     return { revoked: id };

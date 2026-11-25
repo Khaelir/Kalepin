@@ -477,6 +477,15 @@ export class FilesService extends EventEmitter {
         // attachment files into the destination namespace so the doc still renders.
         await this.copyAttachmentsAcrossBoundary(src, dest);
       }
+      // Grants and public links were given for the folder the note leaves.
+      // Moving to another namespace (shared vault <-> a personal folder) drops
+      // them instead of letting them open the note in its new home; the owner
+      // shares it again there if she wants to.
+      const namespaceOf = (p: string) => (isUnderPersonalRoot(p) ? p.split('/')[1] : '');
+      if (namespaceOf(src) !== namespaceOf(dest)) {
+        await this.shareLinks?.revokeAtOrUnder(src);
+        await this.grants?.cascadeDelete(src);
+      }
       // Update share link path (file or folder rename)
       if (this.shareLinks) {
         await this.shareLinks.updatePath(src, dest);
