@@ -63,8 +63,10 @@ export class AttachmentsController {
     res.send(buffer);
   }
 
+  // Sweeps every namespace, every user's included: admin maintenance, like
+  // search reindex and the encryption sweeps.
   @Post('attachments/cleanup')
-  @RequiredScope('attachments:write')
+  @RequiredScope('admin:backup')
   async cleanup() {
     return this.attachmentsService.cleanup();
   }
