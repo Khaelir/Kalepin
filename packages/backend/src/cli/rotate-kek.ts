@@ -1,7 +1,10 @@
 /**
  * KEK rotation CLI.
  *
- *   node dist/cli/rotate-kek.js --new-kek-file=/run/secrets/kalepin.kek.new
+ *   node packages/backend/dist/backend/src/cli/rotate-kek.js --new-kek-file=/run/secrets/kalepin.kek.new
+ *
+ * Run it with the server stopped (it refuses while the server's heartbeat is
+ * fresh): the server holds the old KEK in memory.
  *
  * Walks every encrypted file in both zones (personal + shared), unwraps the
  * CEK with the old KEK source (KALEPIN_KEK_FILE) and re-wraps it with the new
@@ -31,6 +34,11 @@ import {
 import { skipSweepEntry } from '../encryption/sweep-entry-filter';
 import { isE2EPath, isE2ETombstonePath } from '../crypto/encryption-predicates';
 import { PERSONAL_PREFIX } from '../auth/visibility';
+import {
+  HEARTBEAT_STALE_MS,
+  readLiveServerHeartbeat,
+  serverHeartbeatPath,
+} from '../storage/server-heartbeat';
 
 interface Args {
   newKekFile: string;
@@ -58,6 +66,10 @@ function printHelp(): void {
       'Usage: rotate-kek --new-kek-file=PATH [--yes]',
       '',
       'Required env: KALEPIN_KEK_FILE points to the current KEK.',
+      '',
+      'Stop the Kalepin server first: it keeps the current KEK in memory. The',
+      'rotation refuses to start while the server heartbeat next to DB_PATH is',
+      'fresh.',
       '',
       'Walks every encrypted file in VAULT_PATH and PERSONAL_PATH and re-wraps the',
       'CEK with the new KEK. Bulk ciphertext bytes are unchanged. Idempotent and',
@@ -223,6 +235,23 @@ async function main(): Promise<void> {
   const oldKekPath = process.env.KALEPIN_KEK_FILE;
   if (!oldKekPath) {
     console.error('error: KALEPIN_KEK_FILE env var must be set to the current KEK path');
+    process.exit(2);
+  }
+
+  // The server unwraps with the KEK it loaded at boot: notes rotated under it
+  // become unreadable to it, and its saves race the rewrap.
+  const heartbeatFile = serverHeartbeatPath();
+  const live = readLiveServerHeartbeat(heartbeatFile);
+  if (live) {
+    const age = Math.max(0, Math.round((Date.now() - live.heartbeatAt) / 1000));
+    console.error(
+      [
+        `error: the Kalepin server is running (heartbeat ${age}s ago in ${heartbeatFile}` +
+          `${live.pid ? `, pid ${live.pid}` : ''}${live.host ? ` on ${live.host}` : ''}).`,
+        'Stop it, rotate, then start it with the new KEK.',
+        `If it is already stopped, retry in ${Math.max(1, HEARTBEAT_STALE_MS / 1000 - age)}s or delete that file.`,
+      ].join('\n'),
+    );
     process.exit(2);
   }
 

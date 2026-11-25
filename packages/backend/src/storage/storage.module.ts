@@ -8,6 +8,7 @@ import { LocalFSAdapter, assertVaultWritableAndSyncable } from './local-fs.adapt
 import { GitAdapter } from './git.adapter';
 import { RoutingStorageAdapter } from './routing-fs.adapter';
 import { EncryptingStorageAdapter } from './encrypting-fs.adapter';
+import { ServerHeartbeatService } from './server-heartbeat';
 import {
   KEKSource,
   FileKEKSource,
@@ -129,6 +130,7 @@ function resolveKEKSource(logger: Logger): KEKSource | null {
         return new EncryptingStorageAdapter(base, kek, predicates);
       },
     },
+    ServerHeartbeatService,
   ],
   exports: [STORAGE_ADAPTER, KEK_SOURCE],
 })

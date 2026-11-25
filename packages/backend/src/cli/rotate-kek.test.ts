@@ -4,6 +4,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
+import { spawnSync } from 'child_process';
 import { DataSource } from 'typeorm';
 import { MemoryKEKSource } from '../crypto/kek-source';
 import { encrypt, decrypt, rewrapEnvelope } from '../crypto/envelope';
@@ -124,5 +125,50 @@ describe('rotate-kek — zone fingerprints', () => {
     } finally {
       await ds.destroy();
     }
+  });
+});
+
+describe('rotate-kek — running server', () => {
+  async function setup(heartbeatAgeMs: number) {
+    const oldBytes = crypto.randomBytes(32);
+    const oldFile = path.join(tmpRoot, 'old.kek');
+    const newFile = path.join(tmpRoot, 'new.kek');
+    await fs.writeFile(oldFile, oldBytes, { mode: 0o600 });
+    await fs.writeFile(newFile, crypto.randomBytes(32), { mode: 0o600 });
+    const env = await plant(personal, `${USER}/note.md`, `_users/${USER}/note.md`, new MemoryKEKSource(oldBytes));
+    const dbDir = path.join(tmpRoot, 'db');
+    await fs.mkdir(dbDir, { recursive: true });
+    const heartbeatAt = Date.now() - heartbeatAgeMs;
+    await fs.writeFile(path.join(dbDir, 'kalepin-server.heartbeat'), JSON.stringify({ pid: 4242, host: 'srv', heartbeatAt }));
+    const run = () => spawnSync(process.execPath, [path.join(__dirname, 'rotate-kek.js'), `--new-kek-file=${newFile}`], {
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        KALEPIN_KEK_FILE: oldFile,
+        DB_PATH: path.join(dbDir, 'kalepin.sqlite'),
+        VAULT_PATH: shared.root,
+        PERSONAL_PATH: personal.root,
+      },
+    });
+    return { env, run };
+  }
+
+  it('refuses to rotate while the server heartbeat is fresh', async () => {
+    const { env, run } = await setup(5_000);
+
+    const out = run();
+
+    assert.equal(out.status, 2, out.stderr);
+    assert.match(out.stderr, /server is running/);
+    assert.deepEqual(await readAt(personal, `${USER}/note.md`), env);
+  });
+
+  it('rotates once the heartbeat has gone stale', async () => {
+    const { env, run } = await setup(10 * 60_000);
+
+    const out = run();
+
+    assert.equal(out.status, 0, out.stderr);
+    assert.notDeepEqual(await readAt(personal, `${USER}/note.md`), env);
   });
 });
