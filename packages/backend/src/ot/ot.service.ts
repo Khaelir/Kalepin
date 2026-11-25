@@ -91,8 +91,8 @@ export class OTService {
   /**
    * Join `ws` to the live session of `docId`, starting one from disk if
    * needed. Resolves to null when `docId` is not a note that can be edited
-   * as text (a folder, an unreadable or binary file): a session there would
-   * overwrite it on its first flush.
+   * as text (a folder, a file that can't be read or decrypted, a binary
+   * file): a session there would overwrite it on its first flush.
    */
   async openDocument(
     docId: string,
@@ -104,11 +104,12 @@ export class OTService {
     if (!this.sessionManager.getSession(docId)) {
       try {
         content = await this.storage.read(docId);
-      } catch {
-        // Nothing there yet: a new document. Something that exists but can't
-        // be read is not a note.
-        if (await this.storage.exists(docId)) {
-          this.logger.warn(`Refusing to open "${docId}": it exists but can't be read as a note`);
+      } catch (err) {
+        // Only "no such file" means a new document. Any other failure (a
+        // folder, no permission, a wrong key or a tampered envelope) is a
+        // note we can't see: an empty session would overwrite it.
+        if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          this.logger.warn(`Refusing to open "${docId}": ${(err as Error)?.message ?? err}`);
           return null;
         }
       }
