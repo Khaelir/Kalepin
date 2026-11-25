@@ -32,6 +32,21 @@ function isMarkdownSerializable(node: PMNode): boolean {
   return ok;
 }
 
+/**
+ * Render a cell's content to markdown in a scratch serializer state, so the
+ * row can decide what to write. The leading "| " gives tiptap-markdown's
+ * mark-delimiter trimming the same context it has inside the row.
+ */
+function renderCell(state: any, cell: PMNode): string {
+  const cellContent = cell.firstChild;
+  if (!cellContent) return '';
+  const cellState = new state.constructor(state.nodes, state.marks, state.options);
+  cellState.inTable = true;
+  cellState.out = '| ';
+  cellState.render(cellContent, cell, 0);
+  return cellState.out.slice(2);
+}
+
 /** Table extension with fixed markdown serialization for block content in cells. */
 export const TableWithMarkdown = Table.configure({ resizable: false }).extend({
   addKeyboardShortcuts() {
@@ -111,10 +126,10 @@ export const TableWithMarkdown = Table.configure({ resizable: false }).extend({
             state.write('| ');
             row.forEach((col: PMNode, _p2: number, j: number) => {
               if (j) state.write(' | ');
-              const cellContent = col.firstChild;
-              if (cellContent && cellContent.textContent.trim()) {
-                state.renderInline(cellContent);
-              }
+              // Judge emptiness on the markdown, not the text: a cell holding
+              // only a wikilink or a mention has no text but is not empty.
+              const cellMarkdown = renderCell(state, col);
+              if (cellMarkdown.trim()) state.write(cellMarkdown);
             });
             state.write(' |');
             state.ensureNewLine();
