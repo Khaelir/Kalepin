@@ -4,10 +4,11 @@ import { Repository, DataSource, In, IsNull } from 'typeorm';
 import { STORAGE_ADAPTER, StorageAdapter } from '../storage';
 import { FileWatcherService } from '../files/file-watcher.service';
 import { NoteLink } from '../entities';
-import { FileEntry } from '@kalepin/shared';
+import { FileChangeEvent, FileEntry } from '@kalepin/shared';
 import { parseLinksFromMarkdown, resolveWikilink, resolveMarkdownLink, canLinkTo } from './link-parser';
 import { OTService } from '../ot/ot.service';
-import { isVisibleTo } from '../auth/visibility';
+import { isVisibleTo, personalRootFor } from '../auth/visibility';
+import { isE2EPath } from '../crypto/encryption-predicates';
 import { GrantAwareVisibility } from '../auth/grant-aware-visibility.service';
 import { escapeLike } from '../auth/like-escape';
 import * as path from 'path';
@@ -53,6 +54,8 @@ export interface GraphData {
 }
 
 const LINK_HEAL_SWEEP_INTERVAL_MS = 10 * 60_000;
+/** Bump when the indexing or resolution rules change: boot then rebuilds the index. */
+export const LINK_INDEX_VERSION = 1;
 
 @Injectable()
 export class LinkIndexService {
@@ -89,19 +92,19 @@ export class LinkIndexService {
 
   async onModuleInit() {
     // Build path list
-    this.allPaths = await this.collectMarkdownFiles('');
+    this.allPaths = await this.collectMarkdownFiles();
 
     await this.createMetaTable();
 
-    // Full scan if table is empty
+    // Full scan if table is empty, or was built under older resolution rules
     const count = await this.linkRepo.count();
-    if (count === 0) {
+    if (count === 0 || (await this.storedIndexVersion()) !== LINK_INDEX_VERSION) {
       await this.fullScan();
     }
 
-    // Subscribe to file watcher for incremental updates
-    this.fileWatcher.onFileChange(async (event) => {
-      if (!event.path.endsWith('.md')) return;
+    // Subscribe to file watcher for incremental updates, shared vault and personal folders
+    const onChange = async (event: FileChangeEvent) => {
+      if (!this.isIndexable(event.path)) return;
 
       if (event.event === 'add') {
         const isNew = this.trackPath(event.path);
@@ -126,11 +129,13 @@ export class LinkIndexService {
         await this.removeFile(event.path);
         await this.clearIndexedMtime(event.path);
       }
-    });
+    };
+    this.fileWatcher.onFileChange(onChange);
+    this.fileWatcher.onPersonalChange(onChange);
 
     // Internal-write fast path: indexer consumes content with no disk read.
     this.fileWatcher.onInternalWrite(async (notePath, content) => {
-      if (!notePath.endsWith('.md')) return;
+      if (!this.isIndexable(notePath)) return;
       const isNew = this.trackPath(notePath);
       try {
         await this.indexFile(notePath, content);
@@ -159,6 +164,21 @@ export class LinkIndexService {
         indexed_mtime INTEGER
       )
     `);
+    await this.dataSource.query(`CREATE TABLE IF NOT EXISTS note_links_version (version INTEGER NOT NULL)`);
+  }
+
+  private async storedIndexVersion(): Promise<number | null> {
+    const rows: { version: number }[] = await this.dataSource.query(`SELECT version FROM note_links_version`);
+    return rows.length > 0 ? Number(rows[0].version) : null;
+  }
+
+  /** False for E2E paths (`_users/{email}/_secure/…`) and anything inside a dot-folder. */
+  private isIndexableLocation(p: string): boolean {
+    return !p.split('/').some((segment) => segment.startsWith('.')) && !isE2EPath(p);
+  }
+
+  private isIndexable(p: string): boolean {
+    return p.endsWith('.md') && this.isIndexableLocation(p);
   }
 
   private async setIndexedMtimeFromDisk(filePath: string): Promise<void> {
@@ -318,8 +338,9 @@ export class LinkIndexService {
   async fullScan(): Promise<void> {
     this.logger.log('Starting full vault link scan...');
     const t0 = Date.now();
-    this.allPaths = await this.collectMarkdownFiles('');
+    this.allPaths = await this.collectMarkdownFiles();
     await this.createMetaTable();
+    await this.linkRepo.clear();
     await this.dataSource.query(`DELETE FROM note_links_meta`);
 
     let indexed = 0;
@@ -333,6 +354,8 @@ export class LinkIndexService {
         // Skip unreadable files
       }
     }
+    await this.dataSource.query(`DELETE FROM note_links_version`);
+    await this.dataSource.query(`INSERT INTO note_links_version (version) VALUES (?)`, [LINK_INDEX_VERSION]);
     this.logger.log(`Full link scan complete: ${indexed} files indexed in ${Date.now() - t0}ms`);
   }
 
@@ -700,17 +723,35 @@ export class LinkIndexService {
     return { nodes, edges: uniqueEdges };
   }
 
-  private async collectMarkdownFiles(dir: string): Promise<string[]> {
-    const entries = await this.storage.list(dir);
-    return this.flattenMarkdownFiles(entries);
+  /**
+   * Every indexable note. `storage.list('')` only walks the shared vault, so
+   * personal folders are listed one by one from the `users` table.
+   */
+  private async collectMarkdownFiles(): Promise<string[]> {
+    const paths = this.flattenMarkdownFiles(await this.storage.list(''));
+    let users: { email: string }[] = [];
+    try {
+      users = await this.dataSource.query(`SELECT email FROM users`);
+    } catch {
+      // No users table — shared vault only.
+    }
+    for (const u of users) {
+      try {
+        paths.push(...this.flattenMarkdownFiles(await this.storage.list(personalRootFor(u.email))));
+      } catch {
+        // Personal folder not created yet, or no personal storage configured.
+      }
+    }
+    return paths;
   }
 
+  /** Indexable notes of a listing; E2E folders and dot-folders are pruned. */
   private flattenMarkdownFiles(entries: FileEntry[]): string[] {
     const paths: string[] = [];
     for (const entry of entries) {
-      if (entry.type === 'file' && entry.path.endsWith('.md')) {
+      if (entry.type === 'file' && this.isIndexable(entry.path)) {
         paths.push(entry.path);
-      } else if (entry.type === 'directory' && entry.children) {
+      } else if (entry.type === 'directory' && entry.children && this.isIndexableLocation(entry.path)) {
         paths.push(...this.flattenMarkdownFiles(entry.children));
       }
     }
