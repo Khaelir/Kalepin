@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as api from '../api';
 import type { CompletedTour, ApiKeyScope, OAuthGrantInfo } from '../api';
 import { getAllTours } from '../tours/registry';
-import { clearToken } from '../auth';
+import { clearSession } from '../session';
 import { ConnectClaudeWizard } from './ConnectClaudeWizard';
 import { EncryptionSettings } from './Settings/EncryptionSettings';
 import { PinnedNotesSection } from './Settings/PinnedNotesSection';
@@ -547,8 +547,8 @@ export function SettingsPage({ onBack, completedTours = [], onStartTour }: Setti
           <h2 className="settings-section-title">Account</h2>
           <button
             className="settings-logout-btn"
-            onClick={() => {
-              clearToken();
+            onClick={async () => {
+              await clearSession();
               window.location.reload();
             }}
           >

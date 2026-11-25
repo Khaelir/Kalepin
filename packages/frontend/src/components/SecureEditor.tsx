@@ -5,13 +5,12 @@ import { PassphrasePromptDialog } from './PassphrasePromptDialog';
 import { SecureOnboardingModal, shouldShowSecureOnboarding } from './SecureOnboardingModal';
 import { SECURE_FOLDER_ENABLED } from '../feature-flags';
 import { Icon } from './Icon';
+import { SecureDraft, type SaveState } from './secure-draft';
 
 interface Props {
   path: string;
   onUnlockNeeded?: () => void;
 }
-
-type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
 
 /**
  * Minimal editor for E2E `_secure/` notes. Concurrent editing is intentionally
@@ -31,13 +30,15 @@ export function SecureEditor({ path }: Props) {
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(() => SECURE_FOLDER_ENABLED && shouldShowSecureOnboarding());
-  const debounceRef = useRef<number | null>(null);
-  const dirtyContentRef = useRef<string | null>(null);
+  // The open note's read and unsaved edits, bound to its path (see SecureDraft).
+  const draftRef = useRef<SecureDraft | null>(null);
 
-  const reload = () => {
+  const reload = (draft = draftRef.current) => {
+    if (!draft) return;
     setLoadError(null);
-    readSecureNote(path)
+    draft.load()
       .then((text) => {
+        if (text === null) return; // the note was left, or re-read, meanwhile
         setContent(text);
         setSaveState('idle');
       })
@@ -56,57 +57,43 @@ export function SecureEditor({ path }: Props) {
     setLoadError(null);
     setSaveState('idle');
     setSaveError(null);
-    reload();
+    const draft = new SecureDraft({
+      path,
+      read: readSecureNote,
+      write: writeSecureNote,
+      onState: (state, err) => {
+        setSaveState(state);
+        if (state === 'saving') setSaveError(null);
+        if (state !== 'error') return;
+        if (err instanceof VaultLockedError) {
+          setNeedsUnlock(true);
+          setSaveError('Vault is locked. Unlock to save.');
+          return;
+        }
+        setSaveError((err as Error).message || 'Save failed');
+      },
+    });
+    draftRef.current = draft;
+    reload(draft);
     return () => {
-      if (debounceRef.current !== null) {
-        window.clearTimeout(debounceRef.current);
-        debounceRef.current = null;
-      }
+      if (draftRef.current === draft) draftRef.current = null;
+      // Leaving the note: save its pending edits to its own path.
+      void draft.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
 
-  const flush = async () => {
-    const next = dirtyContentRef.current;
-    if (next === null) return;
-    setSaveState('saving');
-    setSaveError(null);
-    try {
-      await writeSecureNote(path, next);
-      setSaveState('saved');
-    } catch (err) {
-      if (err instanceof VaultLockedError) {
-        setNeedsUnlock(true);
-        setSaveState('error');
-        setSaveError('Vault is locked. Unlock to save.');
-        return;
-      }
-      setSaveState('error');
-      setSaveError((err as Error).message || 'Save failed');
-    }
-  };
-
   const onChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const next = e.target.value;
     setContent(next);
-    dirtyContentRef.current = next;
-    setSaveState('dirty');
-    if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
-    debounceRef.current = window.setTimeout(() => {
-      debounceRef.current = null;
-      void flush();
-    }, 800);
+    draftRef.current?.edit(next);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Cmd/Ctrl+S → flush immediately.
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
-      if (debounceRef.current !== null) {
-        window.clearTimeout(debounceRef.current);
-        debounceRef.current = null;
-      }
-      void flush();
+      void draftRef.current?.flush();
     }
   };
 

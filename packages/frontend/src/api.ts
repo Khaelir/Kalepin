@@ -1,4 +1,5 @@
-import { authHeaders, clearToken } from './auth';
+import { authHeaders } from './auth';
+import { clearSession } from './session';
 import { isE2EEncrypted } from './crypto/path-predicates';
 import { markSelfSaved } from './self-saved-paths';
 import type { FileEntry, CommentThread } from '@kalepin/shared';
@@ -10,8 +11,7 @@ const baseHeaders = () => ({
 
 function checkAuth(res: Response): Response {
   if (res.status === 401) {
-    clearToken();
-    window.location.reload();
+    void clearSession().finally(() => window.location.reload());
   }
   return res;
 }
@@ -1007,6 +1007,8 @@ export async function putVaultMeta(body: {
   passphrase_salt: string;
   recovery_wrapped_kek?: string | null;
   recovery_salt?: string | null;
+  /** The stored wrapping being replaced; required to update an existing vault (omit for first-time setup). */
+  expected_passphrase_wrapped_kek?: string;
 }): Promise<{ ok: true; vault_setup_at: number }> {
   const res = checkAuth(
     await fetch('/api/users/me/vault-meta', {

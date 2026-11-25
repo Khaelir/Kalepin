@@ -41,6 +41,15 @@ export function removeRecent(path: string): void {
   window.dispatchEvent(new CustomEvent(CHANGE_EVENT));
 }
 
+/** Forget the list (sign-out, or another account signing in on this browser). */
+export function clearRecentFiles(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function subscribeRecent(listener: () => void): () => void {
   window.addEventListener(CHANGE_EVENT, listener);
   return () => window.removeEventListener(CHANGE_EVENT, listener);

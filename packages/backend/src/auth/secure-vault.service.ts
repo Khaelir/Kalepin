@@ -3,6 +3,7 @@ import {
   Inject,
   Logger,
   BadRequestException,
+  ConflictException,
   NotFoundException,
   ForbiddenException,
 } from '@nestjs/common';
@@ -24,6 +25,13 @@ export interface VaultMetaUpdate {
   passphrase_salt: string;
   recovery_wrapped_kek?: string | null;
   recovery_salt?: string | null;
+  /**
+   * The stored `passphrase_wrapped_kek` the client read and re-wrapped
+   * (passphrase change, recovery-phrase generation). Required to update an
+   * existing vault. Without it the PUT is a first-time setup, which is
+   * refused while a vault exists — a reset clears the vault first.
+   */
+  expected_passphrase_wrapped_kek?: string | null;
 }
 
 interface ResetPayload {
@@ -107,6 +115,21 @@ export class SecureVaultService {
     }
     if (passphraseSalt.length !== 16) {
       throw new BadRequestException('passphrase_salt must be 16 bytes');
+    }
+
+    // A setup generates a new master-KEK: letting it replace a live vault
+    // would leave every file in it undecryptable. Updates must name the
+    // wrapping they replace, so a stale or mistaken client can't clobber it.
+    const stored = user.passphraseWrappedKek ? Buffer.from(user.passphraseWrappedKek) : null;
+    if (body.expected_passphrase_wrapped_kek == null) {
+      if (stored) {
+        throw new ConflictException('Encrypted Folder is already set up');
+      }
+    } else {
+      const expected = decodeOpt(body.expected_passphrase_wrapped_kek);
+      if (!stored || !expected || !stored.equals(expected)) {
+        throw new ConflictException('Encrypted Folder changed since it was loaded; reload and try again');
+      }
     }
 
     user.passphraseWrappedKek = passphraseKek;

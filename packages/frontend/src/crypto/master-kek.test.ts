@@ -6,6 +6,8 @@ vi.mock('idb-keyval', () => ({
   set: async (k: string, v: unknown) => { idbStore.set(k, v); },
   del: async (k: string) => { idbStore.delete(k); },
 }));
+// The key cache is tied to the signed-in user.
+vi.mock('../auth', () => ({ getTokenUserId: () => '1' }));
 
 const {
   setupVault,

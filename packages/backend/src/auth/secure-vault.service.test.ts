@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import * as assert from 'node:assert/strict';
 import * as crypto from 'crypto';
+import { ConflictException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { FileEntry, FileChangeEvent } from '@kalepin/shared';
 import { User, MagicLinkToken, ApiKey, NoteChange } from '../entities';
@@ -153,8 +154,11 @@ describe('SecureVaultService — putVaultMeta', () => {
     const b = await svc.putVaultMeta(userId, {
       passphrase_wrapped_kek: Buffer.from('two').toString('base64'),
       passphrase_salt: salt2.toString('base64'),
+      expected_passphrase_wrapped_kek: Buffer.from('one').toString('base64'),
     });
     assert.equal(a.vault_setup_at, b.vault_setup_at);
+    const meta = await svc.getVaultMeta(userId);
+    assert.equal(meta.passphrase_wrapped_kek, Buffer.from('two').toString('base64'));
   });
 
   it('preserves recovery blob when the rotation body omits recovery fields', async () => {
@@ -167,9 +171,86 @@ describe('SecureVaultService — putVaultMeta', () => {
     await svc.putVaultMeta(userId, {
       passphrase_wrapped_kek: Buffer.from('p2').toString('base64'),
       passphrase_salt: crypto.randomBytes(16).toString('base64'),
+      expected_passphrase_wrapped_kek: Buffer.from('p').toString('base64'),
     });
     const meta = await svc.getVaultMeta(userId);
     assert.ok(meta.recovery_wrapped_kek, 'recovery_wrapped_kek must survive a passphrase-only rotation');
+  });
+
+  it('adds a recovery phrase to an existing vault when the passphrase wrapping is named', async () => {
+    const pwk = Buffer.from('pwk').toString('base64');
+    const salt = crypto.randomBytes(16).toString('base64');
+    await svc.putVaultMeta(userId, { passphrase_wrapped_kek: pwk, passphrase_salt: salt });
+    await svc.putVaultMeta(userId, {
+      passphrase_wrapped_kek: pwk,
+      passphrase_salt: salt,
+      recovery_wrapped_kek: Buffer.from('rwk').toString('base64'),
+      recovery_salt: crypto.randomBytes(16).toString('base64'),
+      expected_passphrase_wrapped_kek: pwk,
+    });
+    const meta = await svc.getVaultMeta(userId);
+    assert.equal(meta.recovery_wrapped_kek, Buffer.from('rwk').toString('base64'));
+  });
+
+  it('refuses a fresh setup over an existing vault with 409, leaving it intact', async () => {
+    const original = Buffer.from('original-pwk').toString('base64');
+    await svc.putVaultMeta(userId, {
+      passphrase_wrapped_kek: original,
+      passphrase_salt: crypto.randomBytes(16).toString('base64'),
+    });
+    await assert.rejects(
+      () => svc.putVaultMeta(userId, {
+        passphrase_wrapped_kek: Buffer.from('new-master-kek').toString('base64'),
+        passphrase_salt: crypto.randomBytes(16).toString('base64'),
+      }),
+      (err: unknown) => err instanceof ConflictException && err.getStatus() === 409,
+    );
+    const meta = await svc.getVaultMeta(userId);
+    assert.equal(meta.passphrase_wrapped_kek, original);
+  });
+
+  it('refuses an update naming a wrapping that is no longer stored', async () => {
+    await svc.putVaultMeta(userId, {
+      passphrase_wrapped_kek: Buffer.from('current').toString('base64'),
+      passphrase_salt: crypto.randomBytes(16).toString('base64'),
+    });
+    await assert.rejects(
+      () => svc.putVaultMeta(userId, {
+        passphrase_wrapped_kek: Buffer.from('next').toString('base64'),
+        passphrase_salt: crypto.randomBytes(16).toString('base64'),
+        expected_passphrase_wrapped_kek: Buffer.from('stale').toString('base64'),
+      }),
+      ConflictException,
+    );
+    const meta = await svc.getVaultMeta(userId);
+    assert.equal(meta.passphrase_wrapped_kek, Buffer.from('current').toString('base64'));
+  });
+
+  it('refuses an update when there is no vault to update', async () => {
+    await assert.rejects(
+      () => svc.putVaultMeta(userId, {
+        passphrase_wrapped_kek: Buffer.from('next').toString('base64'),
+        passphrase_salt: crypto.randomBytes(16).toString('base64'),
+        expected_passphrase_wrapped_kek: Buffer.from('anything').toString('base64'),
+      }),
+      ConflictException,
+    );
+  });
+
+  it('allows a fresh setup after a deliberate reset', async () => {
+    await svc.putVaultMeta(userId, {
+      passphrase_wrapped_kek: Buffer.from('old').toString('base64'),
+      passphrase_salt: crypto.randomBytes(16).toString('base64'),
+    });
+    await svc.resetVault(userId, ALICE_EMAIL);
+    const out = await svc.putVaultMeta(userId, {
+      passphrase_wrapped_kek: Buffer.from('new').toString('base64'),
+      passphrase_salt: crypto.randomBytes(16).toString('base64'),
+    });
+    assert.equal(out.ok, true);
+    const meta = await svc.getVaultMeta(userId);
+    assert.equal(meta.passphrase_wrapped_kek, Buffer.from('new').toString('base64'));
+    assert.equal(meta.vault_tombstone_at, null);
   });
 });
 
