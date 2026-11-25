@@ -31,8 +31,14 @@ interface DocumentSession {
   closing: boolean;
   /** Settles when the write in progress, if any, is done. Never rejects. */
   flushing?: Promise<void>;
+  /** When the oldest edit not yet written was made (ms), or since the last failed write. */
+  dirtySince?: number;
 }
 
+/** A flush runs after this much typing inactivity... */
+const FLUSH_DEBOUNCE_MS = 3_000;
+/** ...or at the latest this long after the oldest edit not on disk. */
+const FLUSH_MAX_WAIT_MS = 15_000;
 /** First retry after a failed flush; doubles on each failure up to the cap. */
 const FLUSH_RETRY_MS = 5_000;
 const FLUSH_RETRY_MAX_MS = 60_000;
@@ -161,6 +167,7 @@ export class OTSessionManager {
     session.history = [];
     session.historyStart = session.revision;
     session.dirty = false;
+    session.dirtySince = undefined;
     session.lastFlushedContent = newContent;
     this.logger.debug(`Reset session "${docId}", rev=${session.revision}, content length=${newContent.length}`);
   }
@@ -258,12 +265,17 @@ export class OTSessionManager {
     const session = this.sessions.get(docId);
     if (!session) return;
 
+    // 3 seconds of inactivity, but no later than FLUSH_MAX_WAIT_MS after the
+    // oldest unsaved edit: continuous typing must still reach the disk.
+    const now = Date.now();
+    session.dirtySince ??= now;
+    const delay = Math.max(0, Math.min(FLUSH_DEBOUNCE_MS, session.dirtySince + FLUSH_MAX_WAIT_MS - now));
     if (session.flushTimer) clearTimeout(session.flushTimer);
     session.flushTimer = setTimeout(() => {
       this.flushToDisk(docId).catch(() => {
         // Error already logged in flushToDisk; dirty flag preserved for retry
       });
-    }, 3000); // 3 seconds of inactivity
+    }, delay);
 
     this.resetInactivityTimer(docId);
   }
@@ -330,6 +342,7 @@ export class OTSessionManager {
       }
       // Edits made while the write was in flight are not on disk yet.
       session.dirty = session.content !== newContent;
+      session.dirtySince = session.dirty ? Date.now() : undefined;
       session.lastFlushedContent = newContent;
       session.failedFlushes = 0;
       if (session.dirty && this.sessions.get(docId) === session) this.scheduleDebouncedFlush(docId);
@@ -345,8 +358,10 @@ export class OTSessionManager {
       // Notify listeners of successful flush
       this.onFlushResult?.(docId, true);
     } catch (err) {
-      // Flush failed — keep dirty and retry, even if nobody types again
+      // Flush failed — keep dirty and retry, even if nobody types again.
+      // Typing restarts the max-wait so a failing disk isn't hit per keystroke.
       session.failedFlushes++;
+      session.dirtySince = Date.now();
       this.logger.error(`Flush failed for "${docId}", keeping dirty`, err);
       this.onFlushResult?.(docId, false, String(err));
       if (this.sessions.get(docId) === session) this.scheduleFlushRetry(docId);

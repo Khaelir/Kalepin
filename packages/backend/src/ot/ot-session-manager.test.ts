@@ -142,6 +142,37 @@ describe('OTSessionManager — edits made while a flush is writing', () => {
   });
 });
 
+describe('OTSessionManager — continuous typing', () => {
+  // The 3 s debounce restarted on every op with no upper bound, so nothing
+  // reached the disk while someone kept typing.
+  it('flushes at least every 15 s while edits keep coming', () => {
+    mock.timers.reset();
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    manager.getOrCreateSession('a.md', '');
+    manager.addClient('a.md', fakeWs(), 1, 'alice@example.com');
+
+    for (let i = 0; i < 15; i++) {
+      manager.applyOperation('a.md', insert('x', i, i), i, 1);
+      mock.timers.tick(1_000);
+    }
+    assert.equal(flushed.length, 1, 'one flush after 15 s of non-stop typing');
+    assert.equal(flushed[0].content, 'x'.repeat(15));
+  });
+
+  it('still waits for 3 s of inactivity in the common case', async () => {
+    mock.timers.reset();
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    manager.getOrCreateSession('a.md', '');
+    manager.addClient('a.md', fakeWs(), 1, 'alice@example.com');
+    manager.applyOperation('a.md', insert('x', 0, 0), 0, 1);
+    mock.timers.tick(2_999);
+    assert.equal(flushed.length, 0);
+    mock.timers.tick(1);
+    await settle();
+    assert.equal(flushed.length, 1);
+  });
+});
+
 describe('OTSessionManager — closing while a client comes back', () => {
   // The "did a client re-join?" check ran before the close handler (git
   // commit, embedding drain), and the session was deleted after it anyway:
